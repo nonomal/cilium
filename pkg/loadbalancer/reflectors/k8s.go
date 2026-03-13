@@ -65,8 +65,9 @@ var K8sReflectorCell = cell.Module(
 	"k8s-reflector",
 	"Reflects load-balancing state from Kubernetes",
 
+	cell.Provide(provideK8sReflector),
 	cell.ProvidePrivate(newEventStream),
-	cell.Invoke(RegisterK8sReflector),
+	cell.Invoke(func(_ K8sReflectorRegistered) {}),
 )
 
 type reflectorParams struct {
@@ -86,6 +87,13 @@ type reflectorParams struct {
 	TestConfig             *loadbalancer.TestConfig `optional:"true"`
 	Nodes                  statedb.Table[*node.LocalNode]
 	SVCMetrics             SVCMetrics `optional:"true"`
+}
+
+type K8sReflectorRegistered struct{}
+
+func provideK8sReflector(p reflectorParams) K8sReflectorRegistered {
+	RegisterK8sReflector(p)
+	return K8sReflectorRegistered{}
 }
 
 func (p reflectorParams) waitTime() time.Duration {
@@ -303,7 +311,7 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 							l4Addr.Port,
 							loadbalancer.ScopeExternal))
 					}
-					if err := p.Writer.ReleaseBackends(txn, ev.svcName, slices.Values(addrs)); err != nil {
+					if err := p.Writer.DeleteBackendsByAddress(txn, ev.svcName, slices.Values(addrs)); err != nil {
 						p.Log.Error("BUG: Unexpected failure to delete backends", logfields.Error, err)
 					}
 				}
@@ -317,7 +325,7 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 				// UpsertBackend refreshes the frontends already.
 				servicesToRefresh.Delete(name)
 
-				// Convert [k8s.Endpoints] to [loadbalancer.BackendParams]
+				// Convert [k8s.Endpoints] to [loadbalancer.Backend]
 				backends := convertEndpoints(p.Log, p.ExtConfig, name, maps.All(eps.Backends))
 
 				err := p.Writer.UpsertBackends(txn, name, source.Kubernetes, backends)
@@ -345,7 +353,7 @@ func runServiceEndpointsReflector(ctx context.Context, health cell.Health, p ref
 			)
 			var err error
 
-			// Convert [k8s.Endpoints] to [loadbalancer.BackendParams]
+			// Convert [k8s.Endpoints] to [loadbalancer.Backend]
 			backends := convertEndpoints(p.Log, p.ExtConfig, name, allEps.Backends())
 
 			// Find orphaned backends. We are using iter.Seq to avoid unnecessary allocations.
@@ -641,7 +649,7 @@ func upsertHostPort(netnsCookie HaveNetNSCookieSupport, config loadbalancer.Conf
 
 	type podServices struct {
 		service loadbalancer.Service
-		bes     []loadbalancer.BackendParams
+		bes     []loadbalancer.Backend
 		fes     sets.Set[loadbalancer.FrontendParams]
 	}
 
@@ -707,7 +715,7 @@ func upsertHostPort(netnsCookie HaveNetNSCookieSupport, config loadbalancer.Conf
 				ipv4 = ipv4 || addr.Is4()
 				ipv6 = ipv6 || addr.Is6()
 
-				bep := loadbalancer.BackendParams{
+				bep := loadbalancer.Backend{
 					Address: loadbalancer.NewL3n4Addr(
 						proto,
 						addr,

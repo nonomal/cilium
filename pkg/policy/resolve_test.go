@@ -5,6 +5,7 @@ package policy
 
 import (
 	"fmt"
+	"iter"
 	"log/slog"
 	"net/netip"
 	"strconv"
@@ -180,11 +181,7 @@ type DummyOwner struct {
 func (d DummyOwner) CreateRedirects(*L4Filter) {
 }
 
-func (d DummyOwner) GetNamedPort(ingress bool, name string, proto u8proto.U8proto) uint16 {
-	return 80
-}
-
-func (d DummyOwner) GetNamedPortLocked(ingress bool, name string, proto u8proto.U8proto) uint16 {
+func (d DummyOwner) GetNamedPort(ingress bool, name string, proto u8proto.U8proto, destIdentities iter.Seq[identity.NumericIdentity]) uint16 {
 	return 80
 }
 
@@ -594,9 +591,6 @@ func TestL7WithLocalHostWildcard(t *testing.T) {
 	policy := selPolicy.DistillPolicy(logger, DummyOwner{logger: logger}, testRedirects)
 	policy.Ready()
 
-	cachedSelectorHost := td.sc.findCachedIdentitySelector(api.ReservedEndpointSelectors[labels.IDNameHost])
-	require.NotNil(t, cachedSelectorHost)
-
 	expectedEndpointPolicy := EndpointPolicy{
 		Redirects: testRedirects,
 		SelectorPolicy: &selectorPolicy{
@@ -605,6 +599,18 @@ func TestL7WithLocalHostWildcard(t *testing.T) {
 			L4Policy: L4Policy{
 				Revision: repo.GetRevision(),
 				Ingress: L4DirectionPolicy{PortRules: NewL4PolicyMapWithValues(map[string]*L4Filter{
+					api.PortProtocolAny: {
+						Tier:     types.DefaultPolicy,
+						Protocol: api.ProtoAny,
+						Ingress:  true,
+						PerSelectorPolicies: L7DataMap{
+							td.cachedSelectorHost: &PerSelectorPolicy{
+								Verdict:  types.Allow,
+								Priority: 10,
+							},
+						},
+						RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorHost: {nil}}),
+					},
 					"80/TCP": {
 						Tier:     types.Normal,
 						Port:     80,
@@ -612,7 +618,6 @@ func TestL7WithLocalHostWildcard(t *testing.T) {
 						U8Proto:  0x6,
 						Ingress:  true,
 						PerSelectorPolicies: L7DataMap{
-							cachedSelectorHost: nil,
 							td.wildcardCachedSelector: &PerSelectorPolicy{
 								Verdict:          types.Allow,
 								L7Parser:         ParserTypeHTTP,

@@ -104,7 +104,6 @@ lxc_redirect_to_host(struct __ctx_buff *ctx, __u32 src_sec_identity,
 # define ENABLE_PER_PACKET_LB 1
 #endif
 
-#if defined(ENABLE_PER_PACKET_LB) && defined(ENABLE_NODEPORT)
 struct nodeport_nat_info {
 	union v6addr nat_addr;
 	__be16 nat_port;
@@ -116,7 +115,6 @@ struct {
 	__type(value, struct nodeport_nat_info);
 	__uint(max_entries, 1);
 } cilium_nodeport_nat_buffer __section_maps_btf;
-#endif /* ENABLE_PER_PACKET_LB && ENABLE_NODEPORT */
 
 #ifdef ENABLE_IPV4
 static __always_inline void
@@ -808,6 +806,12 @@ ipv6_forward_to_destination(struct __ctx_buff *ctx, struct ipv6hdr *ip6,
 	}
 
 pass_to_stack: __maybe_unused
+#ifndef ENABLE_ROUTING
+	/* See IPv4 path for comments. */
+	if (from_l7lb && ctx_get_ifindex(ctx) != CONFIG(cilium_host_ifindex))
+		return ctx_redirect(ctx, ctx_get_ifindex(ctx), 0);
+#endif /* !ENABLE_ROUTING */
+
 	send_trace_notify(ctx, TRACE_TO_STACK, SECLABEL_IPV6, dst_sec_identity,
 			  TRACE_EP_ID_UNKNOWN, TRACE_IFINDEX_UNKNOWN,
 			  trace->reason, trace->monitor, bpf_htons(ETH_P_IPV6));
@@ -1352,6 +1356,20 @@ ipv4_forward_to_destination(struct __ctx_buff *ctx, struct iphdr *ip4,
 	}
 
 pass_to_stack: __maybe_unused
+#ifndef ENABLE_ROUTING
+	/* With per-endpoint routes, the `cil_lxc_policy_egress` will be
+	 * tail called from cil_to_container for packets sent by a L7 LB.
+	 * In case of a local backend, we execute this code already from the
+	 * backend pod ingress path, and returning CTX_ACT_OK would completely
+	 * bypass ingress policies. Therefore, we need to hairpin the packet
+	 * back to cil_to_container to ensure ingress policies are applied.
+	 * Without per-endpoint routes, endpoint policies are correctly
+	 * checked via tail call from bpf_host.
+	 */
+	if (from_l7lb && ctx_get_ifindex(ctx) != CONFIG(cilium_host_ifindex))
+		return ctx_redirect(ctx, ctx_get_ifindex(ctx), 0);
+#endif /* !ENABLE_ROUTING */
+
 	send_trace_notify(ctx, TRACE_TO_STACK, SECLABEL_IPV4, dst_sec_identity,
 			  TRACE_EP_ID_UNKNOWN, TRACE_IFINDEX_UNKNOWN,
 			  trace->reason, trace->monitor, bpf_htons(ETH_P_IP));
