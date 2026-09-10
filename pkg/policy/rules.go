@@ -8,6 +8,8 @@ import (
 	"errors"
 	"slices"
 
+	"github.com/cilium/cilium/pkg/container/set"
+	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/policy/types"
 )
 
@@ -18,6 +20,7 @@ var ErrTooManyPriorityLevels = errors.New("endpoint policy direction has more th
 // ErrUnorderedTiers is returned if tiers of policy entries are unordered when they are expected to
 // be ordered.
 var ErrUnorderedTiers = errors.New("Unordered policy entry tiers")
+var ErrInvalidTier = errors.New("Too high tier value")
 
 // ErrUnorderedRules is returned if prioritites of policy entries are unordered when they are
 // expected to be ordered.
@@ -53,8 +56,11 @@ func (rules ruleSlice) computeTierPriorities() ([]types.Priority, []int, error) 
 
 	for _, r := range rules {
 		if r.Tier != lastTier {
-			if r.Tier < lastTier || r.Tier >= types.Tier(nTiers) {
+			if r.Tier < lastTier {
 				return nil, nil, ErrUnorderedTiers
+			}
+			if int(r.Tier) >= nTiers {
+				return nil, nil, ErrInvalidTier
 			}
 			// Keep the needed priority levels for the previous tier,
 			// rounding up to next 10 to reduce policy map churn.
@@ -200,6 +206,16 @@ func (rules ruleSlice) AsPolicyEntries() types.PolicyEntries {
 		policyRules = append(policyRules, &r.PolicyEntry)
 	}
 	return policyRules
+}
+
+func (rules ruleSlice) AllIdentitySelections() set.Set[identity.NumericIdentity] {
+	ids := set.NewSet[identity.NumericIdentity]()
+	for _, r := range rules {
+		for _, id := range r.getSubjects() {
+			ids.Insert(id)
+		}
+	}
+	return ids
 }
 
 // traceState is an internal structure used to collect information

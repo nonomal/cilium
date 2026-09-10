@@ -10,23 +10,25 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/byteorder"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
+	"github.com/cilium/cilium/pkg/datapath/types"
+	endpoint "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/option"
 	wgtypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
 // CiliumHost returns a [BPFHost] for attaching bpf_host.c to cilium_host.
-func CiliumHost(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration) any {
+func CiliumHost(ep endpoint.Config, lnc *Config) any {
 	cfg := NewBPFHost(NodeConfig(lnc))
 
 	em := ep.GetNodeMAC()
-	if len(em) != 6 {
+	if !em.IsValid() {
 		panic(fmt.Sprintf("invalid MAC address for cilium_host: %q", em))
 	}
-	cfg.InterfaceMAC = em.As8()
+	cfg.InterfaceMAC.Addr = em
 
 	cfg.InterfaceIfIndex = uint32(ep.GetIfIndex())
+	cfg.DeviceMTU = uint16(lnc.DeviceMTU)
 
 	cfg.SecurityLabel = ep.GetIdentity().Uint32()
 
@@ -57,23 +59,25 @@ func CiliumHost(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfig
 	cfg.TunnelProtocol = lnc.TunnelProtocol
 	cfg.TunnelPort = lnc.TunnelPort
 
-	cfg.EnableIPv4Fragments = option.Config.EnableIPv4 && option.Config.EnableIPv4FragmentsTracking
-	cfg.EnableIPv6Fragments = option.Config.EnableIPv6 && option.Config.EnableIPv6FragmentsTracking
+	cfg.EnableIPv4Fragments = option.Config.EnableIPv4FragmentsTracking
+	cfg.EnableIPv6Fragments = option.Config.EnableIPv6FragmentsTracking
+
+	cfg.HybridRoutingEnabled = option.Config.RoutingMode == option.RoutingModeHybrid
 
 	return cfg
 }
 
 // CiliumNet returns a [BPFHost] for attaching bpf_host.c to cilium_net.
-func CiliumNet(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration, link netlink.Link) any {
+func CiliumNet(ep endpoint.Config, lnc *Config, link netlink.Link) any {
 	cfg := NewBPFHost(NodeConfig(lnc))
 
 	cfg.SecurityLabel = ep.GetIdentity().Uint32()
 
-	em := mac.MAC(link.Attrs().HardwareAddr)
-	if len(em) != 6 {
-		panic(fmt.Sprintf("invalid MAC address for %s: %q", link.Attrs().Name, em))
+	em, err := mac.FromHardwareAddr(link.Attrs().HardwareAddr)
+	if err != nil {
+		panic(fmt.Sprintf("invalid MAC address for %s: %s", link.Attrs().Name, err))
 	}
-	cfg.InterfaceMAC = em.As8()
+	cfg.InterfaceMAC.Addr = em
 
 	cfg.EnableExtendedIPProtocols = option.Config.EnableExtendedIPProtocols
 	cfg.EnableNoServiceEndpointsRoutable = lnc.SvcRouteConfig.EnableNoServiceEndpointsRoutable
@@ -81,6 +85,7 @@ func CiliumNet(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfigu
 
 	ifindex := link.Attrs().Index
 	cfg.InterfaceIfIndex = uint32(ifindex)
+	cfg.DeviceMTU = uint16(lnc.DeviceMTU)
 
 	cfg.HostEPID = uint16(lnc.HostEndpointID)
 
@@ -103,22 +108,23 @@ func CiliumNet(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfigu
 	cfg.TunnelProtocol = lnc.TunnelProtocol
 	cfg.TunnelPort = lnc.TunnelPort
 
-	cfg.EnableIPv4Fragments = option.Config.EnableIPv4 && option.Config.EnableIPv4FragmentsTracking
-	cfg.EnableIPv6Fragments = option.Config.EnableIPv6 && option.Config.EnableIPv6FragmentsTracking
+	cfg.EnableIPv4Fragments = option.Config.EnableIPv4FragmentsTracking
+	cfg.EnableIPv6Fragments = option.Config.EnableIPv6FragmentsTracking
+
+	cfg.HybridRoutingEnabled = option.Config.RoutingMode == option.RoutingModeHybrid
 
 	return cfg
 }
 
 // Netdev returns a [BPFHost] for attaching bpf_host.c to an externally-facing
 // network device.
-func Netdev(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration, link netlink.Link, masq4, masq6 netip.Addr) any {
+func Netdev(ep endpoint.Config, lnc *Config, link netlink.Link, masq4, masq6 netip.Addr) any {
 	cfg := NewBPFHost(NodeConfig(lnc))
 
 	// External devices can be L2-less, in which case it won't have a MAC address
 	// and its ethernet header length is set to 0.
-	em := mac.MAC(link.Attrs().HardwareAddr)
-	if len(em) == 6 {
-		cfg.InterfaceMAC = em.As8()
+	if em, err := mac.FromHardwareAddr(link.Attrs().HardwareAddr); err == nil {
+		cfg.InterfaceMAC.Addr = em
 	} else {
 		cfg.EthHeaderLength = 0
 	}
@@ -127,14 +133,15 @@ func Netdev(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfigurat
 
 	ifindex := link.Attrs().Index
 	cfg.InterfaceIfIndex = uint32(ifindex)
+	cfg.DeviceMTU = uint16(lnc.DeviceMTU)
 
 	// Enable masquerading on external interfaces.
 	if option.Config.EnableBPFMasquerade {
 		if option.Config.EnableIPv4Masquerade && masq4.IsValid() {
-			cfg.NATIPv4Masquerade = masq4.As4()
+			cfg.NATIPv4Masquerade.Addr = masq4.As4()
 		}
 		if option.Config.EnableIPv6Masquerade && masq6.IsValid() {
-			cfg.NATIPv6Masquerade = masq6.As16()
+			cfg.NATIPv6Masquerade.Addr = masq6.As16()
 		}
 		// Masquerading IPv4 traffic from endpoints leaving the host.
 		cfg.EnableRemoteNodeMasquerade = option.Config.EnableRemoteNodeMasquerade
@@ -169,8 +176,29 @@ func Netdev(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfigurat
 	cfg.TunnelProtocol = lnc.TunnelProtocol
 	cfg.TunnelPort = lnc.TunnelPort
 
-	cfg.EnableIPv4Fragments = option.Config.EnableIPv4 && option.Config.EnableIPv4FragmentsTracking
-	cfg.EnableIPv6Fragments = option.Config.EnableIPv6 && option.Config.EnableIPv6FragmentsTracking
+	cfg.EnableIPv4Fragments = option.Config.EnableIPv4FragmentsTracking
+	cfg.EnableIPv6Fragments = option.Config.EnableIPv6FragmentsTracking
+
+	cfg.HybridRoutingEnabled = option.Config.RoutingMode == option.RoutingModeHybrid
+
+	switch link.(type) {
+	case *netlink.Bridge:
+		// When a bridge device has br_netfilter with bridge-nf-call-iptables=1,
+		// the packet must be hairpinned via cilium_net instead of punting to the
+		// stack, because ip_sabotage_in() would skip the TPROXY rule. We simplify
+		// the logic by always hairpinning to the proxy when it's a bridge.
+		cfg.ProxyRedirectViaCiliumNet = true
+	}
+
+	if option.Config.EnableEncryptionStrictModeEgress {
+		cfg.StrictEgressEncryption = types.StrictEncryptionCfg{
+			Enabled:          option.Config.EnableEncryptionStrictModeEgress,
+			IPv4Net:          types.V4Addr{Addr: option.Config.EncryptionStrictEgressCIDR.Addr().As4()},
+			IPv4EncryptIface: types.V4Addr{Addr: lnc.NodeIPv4.As4()},
+			IPv4NetSize:      uint8(option.Config.EncryptionStrictEgressCIDR.Bits()),
+			AllowRemoteNodes: option.Config.EncryptionStrictEgressAllowRemoteNodeIdentities,
+		}
+	}
 
 	return cfg
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/utils"
@@ -24,6 +26,7 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy/api"
 	"github.com/cilium/cilium/pkg/policy/types"
+	pkgTypes "github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
@@ -180,11 +183,7 @@ type DummyOwner struct {
 func (d DummyOwner) CreateRedirects(*L4Filter) {
 }
 
-func (d DummyOwner) GetNamedPort(ingress bool, name string, proto u8proto.U8proto) uint16 {
-	return 80
-}
-
-func (d DummyOwner) GetNamedPortLocked(ingress bool, name string, proto u8proto.U8proto) uint16 {
+func (d DummyOwner) GetIngressNamedPort(name string, proto u8proto.U8proto) uint16 {
 	return 80
 }
 
@@ -210,7 +209,7 @@ func (d DummyOwner) PolicyDebug(msg string, attrs ...any) {
 	d.logger.Debug(msg, attrs...)
 }
 
-func (td *testData) bootstrapRepo(ruleGenFunc func(int) (api.Rules, identity.IdentityMap), numRules int, tb testing.TB) {
+func (td *testData) bootstrapRepo(ruleGenFunc func(int) (api.Rules, identity.IdentityMap), numRules int, _ testing.TB) {
 	SetPolicyEnabled(option.DefaultEnforcement)
 	wg := &sync.WaitGroup{}
 	// load in standard reserved identities
@@ -239,7 +238,7 @@ func BenchmarkResolveCIDRPolicyRules(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		ip, _ := td.repo.resolvePolicyLocked(fooIdentity)
-		ip.detach(true, 0)
+		ip.Detach()
 	}
 }
 
@@ -250,7 +249,7 @@ func BenchmarkResolveNoMatchingRules(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		ip, _ := td.repo.resolvePolicyLocked(fooIdentity)
-		ip.detach(true, 0)
+		ip.Detach()
 	}
 }
 
@@ -266,7 +265,7 @@ func BenchmarkRegenerateCIDRPolicyRules(b *testing.B) {
 		owner.previousMap = epPolicy.GetMapState()
 		epPolicy.Ready()
 	}
-	ip.detach(true, 0)
+	ip.Detach()
 	assert.Equal(b, 44596, owner.previousMap.Len())
 }
 
@@ -277,7 +276,7 @@ func BenchmarkResolveL3IngressPolicyRules(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		ip, _ := td.repo.resolvePolicyLocked(fooIdentity)
-		ip.detach(true, 0)
+		ip.Detach()
 	}
 }
 
@@ -289,7 +288,7 @@ func BenchmarkRegenerateL3IngressPolicyRules(b *testing.B) {
 		ip, _ := td.repo.resolvePolicyLocked(fooIdentity)
 		policy := ip.DistillPolicy(hivetest.Logger(b), DummyOwner{logger: hivetest.Logger(b)}, nil)
 		policy.Ready()
-		ip.detach(true, 0)
+		ip.Detach()
 	}
 }
 
@@ -301,7 +300,7 @@ func BenchmarkRegenerateL3EgressPolicyRules(b *testing.B) {
 		ip, _ := td.repo.resolvePolicyLocked(fooIdentity)
 		policy := ip.DistillPolicy(hivetest.Logger(b), DummyOwner{logger: hivetest.Logger(b)}, nil)
 		policy.Ready()
-		ip.detach(true, 0)
+		ip.Detach()
 	}
 }
 
@@ -322,7 +321,7 @@ func TestEgressCIDRTCPPort(t *testing.T) {
 		Egress: []api.EgressRule{
 			{
 				EgressCommonRule: api.EgressCommonRule{
-					ToCIDR: []api.CIDR{"10.1.1.1"},
+					ToCIDR: []api.CIDR{"10.1.1.1/32"},
 				},
 				ToPorts: []api.PortRule{{
 					Ports: []api.PortProtocol{
@@ -377,7 +376,56 @@ func TestEgressCIDRTCPPort(t *testing.T) {
 	mdl := repo.GetRulesList()
 	require.Contains(t, mdl.Policy, "10.1.1.1")
 
-	require.EqualExportedValues(t, &expectedEndpointPolicy, policy)
+	td.assertEqualPolicies(t, &expectedEndpointPolicy, policy)
+}
+
+type testNamedPortsGetter struct {
+	npm pkgTypes.NamedPortMultiMap
+}
+
+func (g testNamedPortsGetter) GetNamedPorts() pkgTypes.NamedPortMultiMap {
+	return g.npm
+}
+
+func TestGetEgressNamedPorts(t *testing.T) {
+	namedPorts := pkgTypes.NewNamedPortMultiMap()
+	nid1 := identity.NumericIdentity(101)
+	nid2 := identity.NumericIdentity(102)
+	require.True(t, namedPorts.Update(nid1, nil, pkgTypes.NamedPortMap{
+		"http": pkgTypes.PortProto{Port: 8080, Proto: u8proto.TCP},
+	}))
+	require.True(t, namedPorts.Update(nid1, nil, pkgTypes.NamedPortMap{
+		"http": pkgTypes.PortProto{Port: 9090, Proto: u8proto.TCP},
+	}))
+	require.True(t, namedPorts.Update(nid2, nil, pkgTypes.NamedPortMap{
+		"http": pkgTypes.PortProto{Port: 9090, Proto: u8proto.TCP},
+	}))
+
+	sp := newSelectorPolicy(testNewSelectorCache(t, hivetest.Logger(t), nil), cmtypes.ClusterInfo{MaxConnectedClusters: 255})
+	sp.namedPortsGetter = testNamedPortsGetter{npm: namedPorts}
+
+	portsByNID := map[identity.NumericIdentity]uint16{}
+	for destID, port := range sp.GetEgressNamedPorts("http", u8proto.TCP, slices.Values([]identity.NumericIdentity{nid1, nid2, 103})) {
+		require.NotContains(t, portsByNID, destID)
+		portsByNID[destID] = port
+	}
+	require.Equal(t, map[identity.NumericIdentity]uint16{
+		nid2: 9090,
+	}, portsByNID)
+
+	portsByNID = map[identity.NumericIdentity]uint16{}
+	for destID, port := range sp.GetEgressNamedPorts("http", u8proto.UDP, slices.Values([]identity.NumericIdentity{nid1, nid2})) {
+		require.NotContains(t, portsByNID, destID)
+		portsByNID[destID] = port
+	}
+	require.Empty(t, portsByNID)
+
+	portsByNID = map[identity.NumericIdentity]uint16{}
+	for destID, port := range sp.GetEgressNamedPorts("http", u8proto.TCP, slices.Values([]identity.NumericIdentity{103})) {
+		require.NotContains(t, portsByNID, destID)
+		portsByNID[destID] = port
+	}
+	require.Empty(t, portsByNID)
 }
 
 func TestEgressWildcardCIDRMatchesWorld(t *testing.T) {
@@ -449,7 +497,7 @@ func TestEgressWildcardCIDRMatchesWorld(t *testing.T) {
 		EgressPolicyEnabled:  true,
 	}
 
-	require.EqualExportedValues(t, expectedPolicy, selPolicy)
+	td.assertEqualPolicies(t, expectedPolicy, selPolicy)
 
 	policy := selPolicy.DistillPolicy(logger, DummyOwner{logger: logger}, testRedirects)
 	policy.Ready()
@@ -543,7 +591,7 @@ func TestL7WithIngressWildcard(t *testing.T) {
 		PolicyOwner: DummyOwner{logger: logger},
 	}
 
-	require.EqualExportedValues(t, &expectedEndpointPolicy, policy)
+	td.assertEqualPolicies(t, &expectedEndpointPolicy, policy)
 }
 
 func TestL7WithLocalHostWildcard(t *testing.T) {
@@ -594,9 +642,6 @@ func TestL7WithLocalHostWildcard(t *testing.T) {
 	policy := selPolicy.DistillPolicy(logger, DummyOwner{logger: logger}, testRedirects)
 	policy.Ready()
 
-	cachedSelectorHost := td.sc.findCachedIdentitySelector(api.ReservedEndpointSelectors[labels.IDNameHost])
-	require.NotNil(t, cachedSelectorHost)
-
 	expectedEndpointPolicy := EndpointPolicy{
 		Redirects: testRedirects,
 		SelectorPolicy: &selectorPolicy{
@@ -605,6 +650,18 @@ func TestL7WithLocalHostWildcard(t *testing.T) {
 			L4Policy: L4Policy{
 				Revision: repo.GetRevision(),
 				Ingress: L4DirectionPolicy{PortRules: NewL4PolicyMapWithValues(map[string]*L4Filter{
+					api.PortProtocolAny: {
+						Tier:     types.DefaultPolicy,
+						Protocol: api.ProtoAny,
+						Ingress:  true,
+						PerSelectorPolicies: L7DataMap{
+							td.cachedSelectorHost: &PerSelectorPolicy{
+								Verdict:  types.Allow,
+								Priority: 10,
+							},
+						},
+						RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.cachedSelectorHost: {nil}}),
+					},
 					"80/TCP": {
 						Tier:     types.Normal,
 						Port:     80,
@@ -612,7 +669,6 @@ func TestL7WithLocalHostWildcard(t *testing.T) {
 						U8Proto:  0x6,
 						Ingress:  true,
 						PerSelectorPolicies: L7DataMap{
-							cachedSelectorHost: nil,
 							td.wildcardCachedSelector: &PerSelectorPolicy{
 								Verdict:          types.Allow,
 								L7Parser:         ParserTypeHTTP,
@@ -633,7 +689,7 @@ func TestL7WithLocalHostWildcard(t *testing.T) {
 		PolicyOwner: DummyOwner{logger: logger},
 	}
 
-	require.EqualExportedValues(t, &expectedEndpointPolicy, policy)
+	td.assertEqualPolicies(t, &expectedEndpointPolicy, policy)
 }
 
 func TestMapStateWithIngressWildcard(t *testing.T) {
@@ -726,7 +782,7 @@ func TestMapStateWithIngressWildcard(t *testing.T) {
 	// policyMapState cannot be compared via DeepEqual
 	require.Truef(t, policy.policyMapState.Equal(&expectedEndpointPolicy.policyMapState), policy.policyMapState.diff(&expectedEndpointPolicy.policyMapState))
 
-	require.EqualExportedValues(t, &expectedEndpointPolicy, policy)
+	td.assertEqualPolicies(t, &expectedEndpointPolicy, policy)
 }
 
 func TestMapStateWithIngress(t *testing.T) {
@@ -821,6 +877,9 @@ func TestMapStateWithIngress(t *testing.T) {
 	cachedSelectorWorldV6 := td.sc.findCachedIdentitySelector(api.ReservedEndpointSelectors[labels.IDNameWorldIPv6])
 	require.NotNil(t, cachedSelectorWorldV6)
 
+	cachedSelectorAggregateWorld := td.sc.findCachedIdentitySelector(api.EntitySelectorMapping[api.EntityWorld][3])
+	require.NotNil(t, cachedSelectorAggregateWorld)
+
 	cachedSelectorTest := td.sc.findCachedIdentitySelector(api.NewESFromLabels(lblTest))
 	require.NotNil(t, cachedSelectorTest)
 
@@ -842,9 +901,10 @@ func TestMapStateWithIngress(t *testing.T) {
 						U8Proto:  0x6,
 						Ingress:  true,
 						PerSelectorPolicies: L7DataMap{
-							cachedSelectorWorld:   nil,
-							cachedSelectorWorldV4: nil,
-							cachedSelectorWorldV6: nil,
+							cachedSelectorWorld:          nil,
+							cachedSelectorWorldV4:        nil,
+							cachedSelectorWorldV6:        nil,
+							cachedSelectorAggregateWorld: nil,
 							cachedSelectorTest: &PerSelectorPolicy{
 								Verdict: types.Allow,
 								Authentication: &api.Authentication{
@@ -853,10 +913,11 @@ func TestMapStateWithIngress(t *testing.T) {
 							},
 						},
 						RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
-							cachedSelectorWorld:   {ruleLabel},
-							cachedSelectorWorldV4: {ruleLabel},
-							cachedSelectorWorldV6: {ruleLabel},
-							cachedSelectorTest:    {ruleLabel},
+							cachedSelectorWorld:          {ruleLabel},
+							cachedSelectorWorldV4:        {ruleLabel},
+							cachedSelectorWorldV6:        {ruleLabel},
+							cachedSelectorAggregateWorld: {ruleLabel},
+							cachedSelectorTest:           {ruleLabel},
 						}),
 					},
 				})},
@@ -868,17 +929,18 @@ func TestMapStateWithIngress(t *testing.T) {
 		PolicyOwner: DummyOwner{logger: logger},
 		policyMapState: emptyMapState(logger).withState(mapStateMap{
 			EgressKey(): allowEgressMapStateEntry,
-			IngressKey().WithIdentity(identity.ReservedIdentityWorld).WithTCPPort(80):     rule1MapStateEntry,
-			IngressKey().WithIdentity(identity.ReservedIdentityWorldIPv4).WithTCPPort(80): rule1MapStateEntry,
-			IngressKey().WithIdentity(identity.ReservedIdentityWorldIPv6).WithTCPPort(80): rule1MapStateEntry,
-			IngressKey().WithIdentity(192).WithTCPPort(80):                                rule1MapStateEntry.withExplicitAuth(AuthTypeDisabled),
-			IngressKey().WithIdentity(194).WithTCPPort(80):                                rule1MapStateEntry.withExplicitAuth(AuthTypeDisabled),
+			IngressKey().WithIdentity(identity.ReservedIdentityWorld).WithTCPPort(80):          rule1MapStateEntry,
+			IngressKey().WithIdentity(identity.ReservedIdentityWorldIPv4).WithTCPPort(80):      rule1MapStateEntry,
+			IngressKey().WithIdentity(identity.ReservedIdentityWorldIPv6).WithTCPPort(80):      rule1MapStateEntry,
+			IngressKey().WithIdentity(identity.ReservedIdentityAggregateWorld).WithTCPPort(80): rule1MapStateEntry,
+			IngressKey().WithIdentity(192).WithTCPPort(80):                                     rule1MapStateEntry.withExplicitAuth(AuthTypeDisabled),
+			IngressKey().WithIdentity(194).WithTCPPort(80):                                     rule1MapStateEntry.withExplicitAuth(AuthTypeDisabled),
 		}),
 	}
 
 	// Verify that cached selector is not found after Detach().
 	// Note that this depends on the other tests NOT using the same selector concurrently!
-	policy.SelectorPolicy.detach(true, 0)
+	policy.SelectorPolicy.Detach()
 	cachedSelectorTest = td.sc.findCachedIdentitySelector(api.NewESFromLabels(lblTest))
 	require.Nil(t, cachedSelectorTest)
 
@@ -897,7 +959,7 @@ func TestMapStateWithIngress(t *testing.T) {
 	// policyMapState cannot be compared via DeepEqual
 	require.Truef(t, policy.policyMapState.Equal(&expectedEndpointPolicy.policyMapState), policy.policyMapState.diff(&expectedEndpointPolicy.policyMapState))
 
-	require.EqualExportedValues(t, &expectedEndpointPolicy, policy)
+	td.assertEqualPolicies(t, &expectedEndpointPolicy, policy)
 }
 
 // allowsIdentity returns whether the specified policy allows
@@ -1137,4 +1199,55 @@ func TestEndpointPolicy_GetRuleMeta(t *testing.T) {
 	rm, err = p.GetRuleMeta(key1)
 	require.NoError(t, err)
 	require.Equal(t, NilRuleOrigin.Value(), rm)
+}
+
+func TestEndpointPolicy_Lookup_PortRange(t *testing.T) {
+	log := hivetest.Logger(t)
+
+	rangeEntry := ingressKey(192, 6, 64, 10)
+	flowKey := ingressKey(192, 6, 80, 16)
+
+	lbls := labels.ParseLabelArray("k8s:io.cilium.k8s.policy.name=allow-egress-port-range")
+	lblss := labels.LabelArrayList{lbls}
+
+	p := &EndpointPolicy{
+		policyMapState: emptyMapState(log).withState(mapStateMap{
+			rangeEntry: newMapStateEntry(0, types.HighestPriority, types.LowestPriority, makeSingleRuleOrigin(lbls, "log"), 0, 0, types.Allow, NoAuthRequirement),
+		}),
+	}
+
+	_, rm, found := p.Lookup(flowKey)
+	require.True(t, found, "Lookup for a port inside a stored range should succeed")
+	require.Equal(t, lblss, rm.LabelArray(),
+		"rule meta should come from the covering port-range entry")
+
+	outOfRangeKey := ingressKey(192, 6, 200, 16)
+	_, _, found = p.Lookup(outOfRangeKey)
+	require.False(t, found, "Lookup for a port outside the stored range should miss")
+}
+
+// TestEndpointPolicy_Lookup_PortRange_L4Only covers the L4-only side of the
+// L3-vs-L4 precedence in mapState.lookup: when the stored entry has identity
+// zero and a port range, a flow keyed by a specific port inside that range
+// must still resolve to it.
+func TestEndpointPolicy_Lookup_PortRange_L4Only(t *testing.T) {
+	log := hivetest.Logger(t)
+
+	// L4-only range entry: identity == 0, port 64-127, TCP.
+	rangeEntry := ingressKey(0, 6, 64, 10)
+	flowKey := ingressKey(0, 6, 80, 16)
+
+	lbls := labels.ParseLabelArray("k8s:io.cilium.k8s.policy.name=allow-l4only-port-range")
+	lblss := labels.LabelArrayList{lbls}
+
+	p := &EndpointPolicy{
+		policyMapState: emptyMapState(log).withState(mapStateMap{
+			rangeEntry: newMapStateEntry(0, types.HighestPriority, types.LowestPriority, makeSingleRuleOrigin(lbls, "log"), 0, 0, types.Allow, NoAuthRequirement),
+		}),
+	}
+
+	_, rm, found := p.Lookup(flowKey)
+	require.True(t, found, "L4Only Lookup for a port inside a stored range should succeed")
+	require.Equal(t, lblss, rm.LabelArray(),
+		"rule meta should come from the covering port-range entry")
 }

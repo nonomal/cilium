@@ -36,13 +36,15 @@ import (
 
 	daemonk8s "github.com/cilium/cilium/daemon/k8s"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+	"github.com/cilium/cilium/pkg/completion"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
-	"github.com/cilium/cilium/pkg/envoy"
 	envoyCfg "github.com/cilium/cilium/pkg/envoy/config"
+	"github.com/cilium/cilium/pkg/envoy/xds"
 	"github.com/cilium/cilium/pkg/hive"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
 	"github.com/cilium/cilium/pkg/k8s/synced"
+	k8sTables "github.com/cilium/cilium/pkg/k8s/tables"
 	k8sTestutils "github.com/cilium/cilium/pkg/k8s/testutils"
 	"github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/kpr"
@@ -75,7 +77,7 @@ func TestScript(t *testing.T) {
 			k8sClient.FakeClientCell(),
 			synced.Cell,
 			daemonk8s.ResourcesCell,
-			daemonk8s.TablesCell,
+			k8sTables.TablesCell,
 			metrics.Cell,
 			maglev.Cell,
 			cell.Config(CECConfig{}),
@@ -263,7 +265,6 @@ func TestScript(t *testing.T) {
 		setup,
 		[]string{},
 		"testdata/*.txtar")
-
 }
 
 type resourceKey struct {
@@ -289,7 +290,7 @@ func (rs resourceStore) equal(other resourceStore) bool {
 	return maps.EqualFunc(rs, other, proto.Equal)
 }
 
-func (rs resourceStore) update(res *envoy.Resources) {
+func (rs resourceStore) update(res *xds.Resources) {
 	for _, l := range res.Listeners {
 		rs[resourceKey{kind: listenerKey, name: l.Name}.String()] = l
 	}
@@ -307,7 +308,7 @@ func (rs resourceStore) update(res *envoy.Resources) {
 	}
 }
 
-func (rs resourceStore) delete(res *envoy.Resources) {
+func (rs resourceStore) delete(res *xds.Resources) {
 	for _, l := range res.Listeners {
 		delete(rs, resourceKey{kind: listenerKey, name: l.Name}.String())
 	}
@@ -454,7 +455,7 @@ func indentLines(s string) string {
 }
 
 // DeleteResources implements envoySyncer.
-func (f *fakeEnvoySyncerAndPolicyTrigger) DeleteEnvoyResources(ctx context.Context, res envoy.Resources) error {
+func (f *fakeEnvoySyncerAndPolicyTrigger) DeleteEnvoyResources(ctx context.Context, res xds.Resources, waitGroup *completion.WaitGroup) error {
 	f.Lock()
 	defer f.Unlock()
 	f.store.delete(&res)
@@ -468,7 +469,7 @@ func (f *fakeEnvoySyncerAndPolicyTrigger) DeleteEnvoyResources(ctx context.Conte
 }
 
 // UpdateResources implements envoySyncer.
-func (f *fakeEnvoySyncerAndPolicyTrigger) UpdateEnvoyResources(ctx context.Context, old envoy.Resources, new envoy.Resources) error {
+func (f *fakeEnvoySyncerAndPolicyTrigger) UpdateEnvoyResources(ctx context.Context, old xds.Resources, new xds.Resources, waitGroup *completion.WaitGroup) error {
 	f.Lock()
 	defer f.Unlock()
 	f.store.delete(&old)
@@ -506,6 +507,13 @@ type staticPortAllocator struct {
 	log *slog.Logger
 }
 
+// RestoreComplete implements PortAllocator
+func (s staticPortAllocator) RestoreComplete() <-chan struct{} {
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
 // AckProxyPort implements PortAllocator.
 func (s staticPortAllocator) AckProxyPortWithReference(ctx context.Context, name string) error {
 	s.log.Info("AckProxyPort", logfields.Listener, name)
@@ -530,8 +538,7 @@ func (s staticPortAllocator) ReleaseProxyPort(name string) error {
 
 var _ PortAllocator = staticPortAllocator{}
 
-type mockFeatureMetrics struct {
-}
+type mockFeatureMetrics struct{}
 
 // AddCCEC implements CECMetrics.
 func (m mockFeatureMetrics) AddCCEC() {

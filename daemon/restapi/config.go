@@ -21,12 +21,14 @@ import (
 	daemonapi "github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/daemon/cmd/legacy"
 	"github.com/cilium/cilium/pkg/api"
+	"github.com/cilium/cilium/pkg/datapath/connector"
+	bandwidth "github.com/cilium/cilium/pkg/datapath/linux/bandwidth/types"
 	"github.com/cilium/cilium/pkg/datapath/linux/bigtcp"
 	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
+	endpoint "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/eventqueue"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
@@ -38,6 +40,7 @@ import (
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/policy/compute"
 	"github.com/cilium/cilium/pkg/proxy"
 	"github.com/cilium/cilium/pkg/trigger"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
@@ -74,11 +77,11 @@ type configModifyApiHandlerParams struct {
 	KVStoreConfig   kvstore.Config
 	MonitorAgent    monitorAgent.Agent
 	MTUConfig       mtu.MTU
-	BigTCPConfig    *bigtcp.Configuration
+	BigTCPConfig    bigtcp.Config
 	TunnelConfig    tunnel.Config
-	BandwidthConfig datapath.BandwidthConfig
-	WgConfig        wgTypes.WireguardConfig
-	ConnectorConfig datapath.ConnectorConfig
+	BandwidthConfig bandwidth.Config
+	WgConfig        wgTypes.Config
+	ConnectorConfig connector.Config
 	LocalNodeStore  *node.LocalNodeStore
 
 	EventHandler *ConfigModifyEventHandler
@@ -122,8 +125,9 @@ type configModifyEventHandlerParams struct {
 	Lifecycle cell.Lifecycle
 	Logger    *slog.Logger
 
-	Orchestrator    datapath.Orchestrator
+	Orchestrator    endpoint.Orchestrator
 	Policy          policy.PolicyRepository
+	PolicyComputer  compute.PolicyRecomputer
 	EndpointManager endpointmanager.EndpointManager
 	L7Proxy         *proxy.Proxy
 }
@@ -136,6 +140,7 @@ func newConfigModifyEventHandler(params configModifyEventHandlerParams) *ConfigM
 		logger:          params.Logger,
 		orchestrator:    params.Orchestrator,
 		policy:          params.Policy,
+		computer:        params.PolicyComputer,
 		endpointManager: params.EndpointManager,
 		l7Proxy:         params.L7Proxy,
 	}
@@ -177,8 +182,9 @@ type ConfigModifyEventHandler struct {
 	// event queue for serializing configuration updates to the daemon.
 	configModifyQueue *eventqueue.EventQueue
 
-	orchestrator    datapath.Orchestrator
+	orchestrator    endpoint.Orchestrator
 	policy          policy.PolicyRepository
+	computer        compute.PolicyRecomputer
 	endpointManager endpointmanager.EndpointManager
 	l7Proxy         *proxy.Proxy
 }
@@ -186,10 +192,18 @@ type ConfigModifyEventHandler struct {
 func (h *ConfigModifyEventHandler) datapathRegen(reasons []string) {
 	reason := strings.Join(reasons, ", ")
 
+	// We expect the policy revision to have been bumped prior to this call
+	// here. All endpoints are about to be regenerated so recompute policy
+	// for all endpoints and then trigger regeneration.
+
 	regenerationMetadata := &regeneration.ExternalRegenerationMetadata{
-		Reason:            reason,
+		Reason:            regeneration.ReasonDaemonConfigUpdate,
+		Message:           reason,
 		RegenerationLevel: regeneration.RegenerateWithDatapath,
+
+		PolicyRevisionToWaitFor: h.policy.GetRevision(),
 	}
+	h.computer.RecomputeIdentityPolicyForAllIdentities(regenerationMetadata.PolicyRevisionToWaitFor)
 	h.endpointManager.RegenerateAllEndpoints(regenerationMetadata)
 }
 
@@ -273,7 +287,7 @@ func (h *ConfigModifyEventHandler) changedOption(key string, value option.Option
 	if key == option.Debug {
 		// Set the log level of the agent (this can be a no-op)
 		if option.Config.Opts.IsEnabled(option.Debug) {
-			logging.SetLogLevelToDebug()
+			logging.SetLogLevel(slog.LevelDebug)
 		} else {
 			logging.SetDefaultLogLevel()
 		}
@@ -350,11 +364,11 @@ type getConfigHandler struct {
 	kvstoreConfig   kvstore.Config
 	monitorAgent    monitorAgent.Agent
 	mtuConfig       mtu.MTU
-	bigTCPConfig    *bigtcp.Configuration
+	bigTCPConfig    bigtcp.Config
 	tunnelConfig    tunnel.Config
-	bandwidthConfig datapath.BandwidthConfig
-	wgConfig        wgTypes.WireguardConfig
-	connectorConfig datapath.ConnectorConfig
+	bandwidthConfig bandwidth.Config
+	wgConfig        wgTypes.Config
+	connectorConfig connector.Config
 	localNodeStore  *node.LocalNodeStore
 }
 
@@ -395,7 +409,6 @@ func (h *getConfigHandler) Handle(params daemonapi.GetConfigParams) middleware.R
 	status := &models.DaemonConfigurationStatus{
 		Addressing:       routerNodeAddressing,
 		K8sConfiguration: h.clientset.Config().K8sKubeConfigPath,
-		K8sEndpoint:      h.clientset.Config().K8sAPIServer,
 		NodeMonitor:      h.monitorAgent.State(),
 		KvstoreConfiguration: &models.KVstoreConfiguration{
 			Type:    h.kvstoreConfig.KVStore,
@@ -411,14 +424,14 @@ func (h *getConfigHandler) Handle(params daemonapi.GetConfigParams) middleware.R
 		IpamMode:                     option.Config.IPAM,
 		Masquerade:                   option.Config.MasqueradingEnabled(),
 		MasqueradeProtocols: &models.DaemonConfigurationStatusMasqueradeProtocols{
-			IPV4: option.Config.EnableIPv4Masquerade,
-			IPV6: option.Config.EnableIPv6Masquerade,
+			IPv4: option.Config.EnableIPv4Masquerade,
+			IPv6: option.Config.EnableIPv6Masquerade,
 		},
 		InstallUplinkRoutesForDelegatedIPAM: option.Config.InstallUplinkRoutesForDelegatedIPAM,
 		GROMaxSize:                          int64(h.bigTCPConfig.GetGROIPv6MaxSize()),
 		GSOMaxSize:                          int64(h.bigTCPConfig.GetGSOIPv6MaxSize()),
-		GROIPV4MaxSize:                      int64(h.bigTCPConfig.GetGROIPv4MaxSize()),
-		GSOIPV4MaxSize:                      int64(h.bigTCPConfig.GetGSOIPv4MaxSize()),
+		GROIPv4MaxSize:                      int64(h.bigTCPConfig.GetGROIPv4MaxSize()),
+		GSOIPv4MaxSize:                      int64(h.bigTCPConfig.GetGSOIPv4MaxSize()),
 		IPLocalReservedPorts:                h.getIPLocalReservedPorts(),
 		EnableBBRHostNamespaceOnly:          h.bandwidthConfig.EnableBBRHostnsOnly,
 		DeviceHeadroom:                      int64(h.connectorConfig.GetPodDeviceHeadroom()),
@@ -443,7 +456,7 @@ func (h *getConfigHandler) getNodeRouterAddressing(ctx context.Context) (*models
 	nodeRouterAddressing := &models.NodeAddressing{}
 
 	if h.daemonConfig.EnableIPv6 {
-		nodeRouterAddressing.IPV6 = &models.NodeAddressingElement{
+		nodeRouterAddressing.IPv6 = &models.NodeAddressingElement{
 			Enabled:    h.daemonConfig.EnableIPv6,
 			IP:         ln.GetCiliumInternalIP(true).String(),
 			AllocRange: ln.IPv6AllocCIDR.String(),
@@ -451,7 +464,7 @@ func (h *getConfigHandler) getNodeRouterAddressing(ctx context.Context) (*models
 	}
 
 	if h.daemonConfig.EnableIPv4 {
-		nodeRouterAddressing.IPV4 = &models.NodeAddressingElement{
+		nodeRouterAddressing.IPv4 = &models.NodeAddressingElement{
 			Enabled:    h.daemonConfig.EnableIPv4,
 			IP:         ln.GetCiliumInternalIP(false).String(),
 			AllocRange: ln.IPv4AllocCIDR.String(),

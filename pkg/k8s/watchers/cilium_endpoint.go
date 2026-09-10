@@ -11,7 +11,7 @@ import (
 
 	"github.com/cilium/hive/cell"
 
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
+	ipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/types"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	hubblemetrics "github.com/cilium/cilium/pkg/hubble/metrics"
 	"github.com/cilium/cilium/pkg/identity"
@@ -27,7 +27,6 @@ import (
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/source"
 	ciliumTypes "github.com/cilium/cilium/pkg/types"
-	"github.com/cilium/cilium/pkg/u8proto"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
@@ -44,8 +43,8 @@ type k8sCiliumEndpointsWatcherParams struct {
 	EndpointManager endpointmanager.EndpointManager
 	PolicyUpdater   *policy.Updater
 	IPCache         *ipcache.IPCache
-	WgConfig        wgTypes.WireguardConfig
-	IPSecConfig     datapath.IPsecConfig
+	WgConfig        wgTypes.Config
+	IPSecConfig     ipsec.Config
 	LocalNodeStore  *node.LocalNodeStore
 }
 
@@ -79,8 +78,8 @@ type K8sCiliumEndpointsWatcher struct {
 	endpointManager endpointManager
 	policyManager   policyManager
 	ipcache         ipcacheManager
-	wgConfig        wgTypes.WireguardConfig
-	ipsecConfig     datapath.IPsecConfig
+	wgConfig        wgTypes.Config
+	ipsecConfig     ipsec.Config
 	localNodeStore  *node.LocalNodeStore
 
 	ciliumSlimEndpoint  resource.Resource[*types.CiliumEndpoint]
@@ -164,13 +163,13 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 					}
 				}
 				if !v4Added {
-					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV4, source.CustomResource, endpoint.Namespace, endpoint.Name)
+					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV4, source.CustomResource, oldEndpoint.Namespace, oldEndpoint.Name, oldEndpoint.GetPodUID())
 					if portsChanged {
 						namedPortsChanged = true
 					}
 				}
 				if !v6Added {
-					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV6, source.CustomResource, endpoint.Namespace, endpoint.Name)
+					portsChanged := k.ipcache.DeleteOnMetadataMatch(oldPair.IPV6, source.CustomResource, oldEndpoint.Namespace, oldEndpoint.Name, oldEndpoint.GetPodUID())
 					if portsChanged {
 						namedPortsChanged = true
 					}
@@ -216,21 +215,17 @@ func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types
 	k8sMeta := &ipcache.K8sMetadata{
 		Namespace:  endpoint.Namespace,
 		PodName:    endpoint.Name,
+		PodUID:     endpoint.GetPodUID(),
 		NamedPorts: make(ciliumTypes.NamedPortMap, len(endpoint.NamedPorts)),
 	}
 	for _, port := range endpoint.NamedPorts {
-		p, err := u8proto.ParseProtocol(port.Protocol)
-		if err != nil {
+		if err := k8sMeta.NamedPorts.AddPort(port.Name, int(port.Port), port.Protocol); err != nil {
 			k.logger.Error(
-				"Parsing named port protocol failed",
+				"Parsing named port failed",
 				logfields.Error, err,
 				logfields.CEPName, endpoint.GetName(),
 			)
 			continue
-		}
-		k8sMeta.NamedPorts[port.Name] = ciliumTypes.PortProto{
-			Port:  port.Port,
-			Proto: p,
 		}
 	}
 
@@ -260,14 +255,14 @@ func (k *K8sCiliumEndpointsWatcher) endpointDeleted(endpoint *types.CiliumEndpoi
 		namedPortsChanged := false
 		for _, pair := range endpoint.Networking.Addressing {
 			if pair.IPV4 != "" {
-				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV4, source.CustomResource, endpoint.Namespace, endpoint.Name)
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV4, source.CustomResource, endpoint.Namespace, endpoint.Name, endpoint.GetPodUID())
 				if portsChanged {
 					namedPortsChanged = true
 				}
 			}
 
 			if pair.IPV6 != "" {
-				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV6, source.CustomResource, endpoint.Namespace, endpoint.Name)
+				portsChanged := k.ipcache.DeleteOnMetadataMatch(pair.IPV6, source.CustomResource, endpoint.Namespace, endpoint.Name, endpoint.GetPodUID())
 				if portsChanged {
 					namedPortsChanged = true
 				}

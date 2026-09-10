@@ -3,19 +3,16 @@
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
 
-ARG COMPILERS_IMAGE=quay.io/cilium/image-compilers:1770907749-ed0b9a5@sha256:672c3883596bbf9f8d0d5609f2ffa8e994cb42641859b71902c8b76a68b9a11a
-ARG CILIUM_RUNTIME_IMAGE=quay.io/cilium/cilium-runtime:0b48cead92e7ed1850844279c77d0d9139efe570@sha256:3d0a218f323077fe46d2829e6f0f41fe43fbb90b9dbdb8c65067df6ad1220d9a
-ARG TESTER_IMAGE=quay.io/cilium/image-tester:1770906593-bc584f9@sha256:f8368922907632e3cd89b4167b9fee43d9ab9ae1e19a74f5604953f6698a0396
-ARG GOLANG_IMAGE=docker.io/library/golang:1.26.0@sha256:9edf71320ef8a791c4c33ec79f90496d641f306a91fb112d3d060d5c1cee4e20
-ARG CILIUM_LLVM_IMAGE=quay.io/cilium/cilium-llvm:19.1.7-1770907749-ed0b9a5@sha256:9fefa10c2025d45cfdec989f3ec3291834b027c019a6f05f9420e825c376588c
-
-FROM ${COMPILERS_IMAGE} AS compilers-image
+ARG UBUNTU_IMAGE=docker.io/library/ubuntu:26.04@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b
+ARG TESTER_IMAGE=quay.io/cilium/image-tester:1788350380-6995347@sha256:b267cd3bf332c499e9818d65fe97cf10695aec2caf802e14eb664fc58c124813
+ARG GOLANG_IMAGE=docker.io/library/golang:1.27.1@sha256:512690a5660563b57d37ecc31129e7f136e831db2aed24a1dbeb8ad7380dc0fa
+ARG CILIUM_LLVM_IMAGE=quay.io/cilium/cilium-llvm:21.1.8-1788778131-5dd7297@sha256:a310143ff6f8b953f09112e923fa8f7ae407de545339630652a9048032cf3225
 
 FROM ${GOLANG_IMAGE} AS golang-dist
 
 FROM ${CILIUM_LLVM_IMAGE} AS llvm-dist
 
-FROM ${CILIUM_RUNTIME_IMAGE} AS rootfs
+FROM ${UBUNTU_IMAGE} AS rootfs
 
 # Change the number to force the generation of a new git-tree SHA. Useful when
 # we want to re-run 'apt-get upgrade' for stale images.
@@ -24,6 +21,7 @@ ENV FORCE_BUILD=1
 # TARGETARCH is an automatic platform ARG enabled by Docker BuildKit.
 ARG TARGETARCH
 RUN \
+    export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && \
     apt-get upgrade -y --no-install-recommends && \
     apt-get install -y --no-install-recommends \
@@ -40,6 +38,7 @@ RUN \
     unzip \
     # Base Cilium-build dependencies
     binutils \
+    ca-certificates \
     coreutils \
     curl \
     gcc \
@@ -52,8 +51,6 @@ RUN \
     apt-get purge --auto-remove && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
-
-COPY --from=compilers-image /usr/lib/aarch64-linux-gnu /usr/lib/aarch64-linux-gnu
 
 COPY --from=golang-dist /usr/local/go /usr/local/go
 RUN mkdir -p /go
@@ -84,8 +81,13 @@ WORKDIR /go/src/github.com/cilium/cilium/images/builder
 RUN --mount=type=bind,readwrite,target=/go/src/github.com/cilium/cilium/images/builder \
     ./install-test-formatters.sh
 
-# used to facilitate the verifier tests
-COPY --from=llvm-dist /usr/local/bin/llvm-objcopy /usr/local/bin/llvm-strip /bin/
+# clang compiles the BPF datapath in the builder (e.g. 'make -C bpf build_all',
+# 'make run_bpf_tests')
+# llvm-objcopy/llvm-strip are used by the BPF Go tests (pkg/bpf/testdata).
+# llc is intentionally not copied: the BPF build is clang-only, and the datapath
+# verifier tests extract the toolchain from the cilium-llvm image (see
+# contrib/scripts/extract-llvm.sh), not from this image.
+COPY --from=llvm-dist /usr/local/bin/clang /usr/local/bin/llvm-objcopy /usr/local/bin/llvm-strip /bin/
 
 # Create a cache directory with 777 so that we can run the builder image and
 # compile golang code from any UID.

@@ -11,7 +11,6 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/linux/ipsec"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -21,15 +20,10 @@ import (
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
-const (
-	// AutoCIDR indicates that a CIDR should be allocated
-	AutoCIDR = "auto"
-)
-
 func initAndValidateDaemonConfig(params daemonConfigParams) error {
 	// WireGuard and IPSec are mutually exclusive.
 	if params.IPSecConfig.Enabled() && params.WireguardConfig.Enabled() {
-		return fmt.Errorf("WireGuard (--%s) cannot be used with IPsec (--%s)", wgTypes.EnableWireguard, datapath.EnableIPSec)
+		return fmt.Errorf("WireGuard (--%s) cannot be used with IPsec (--%s)", wgTypes.EnableWireguard, option.EnableIPSec)
 	}
 
 	if !params.IPSecConfig.DNSProxyInsecureSkipTransparentModeCheckEnabled() {
@@ -48,10 +42,6 @@ func initAndValidateDaemonConfig(params daemonConfigParams) error {
 		return fmt.Errorf("IPSec doesnt support strict ingress encryption.")
 	}
 
-	if params.DaemonConfig.EnableEncryptionStrictModeIngress && !params.DaemonConfig.TunnelingEnabled() {
-		return fmt.Errorf("Strict ingress encryption requires tunneling to be enabled.")
-	}
-
 	if params.DaemonConfig.EnableHostFirewall {
 		if params.IPSecConfig.Enabled() {
 			return fmt.Errorf("IPSec cannot be used with the host firewall.")
@@ -60,13 +50,13 @@ func initAndValidateDaemonConfig(params daemonConfigParams) error {
 
 	if params.DaemonConfig.LocalRouterIPv4 != "" || params.DaemonConfig.LocalRouterIPv6 != "" {
 		if params.IPSecConfig.Enabled() {
-			return fmt.Errorf("Cannot specify %s or %s with %s.", option.LocalRouterIPv4, option.LocalRouterIPv6, datapath.EnableIPSec)
+			return fmt.Errorf("Cannot specify %s or %s with %s.", option.LocalRouterIPv4, option.LocalRouterIPv6, option.EnableIPSec)
 		}
 	}
 
 	if params.IPSecConfig.Enabled() || params.WireguardConfig.Enabled() {
 		if !params.DaemonConfig.EnableCiliumNodeCRD {
-			return fmt.Errorf("CiliumNode CRD cannot be disabled when encryption is enabled with WireGuard (--%s) or IPsec (--%s)", wgTypes.EnableWireguard, datapath.EnableIPSec)
+			return fmt.Errorf("CiliumNode CRD cannot be disabled when encryption is enabled with WireGuard (--%s) or IPsec (--%s)", wgTypes.EnableWireguard, option.EnableIPSec)
 		}
 	}
 
@@ -155,7 +145,8 @@ func configureDaemon(ctx context.Context, params daemonParams) error {
 		}
 
 		if params.DaemonConfig.IPAM == ipamOption.IPAMClusterPool ||
-			params.DaemonConfig.IPAM == ipamOption.IPAMMultiPool {
+			params.DaemonConfig.IPAM == ipamOption.IPAMMultiPool ||
+			params.DaemonConfig.IPAM == ipamOption.IPAMENI {
 			// Create the CiliumNode custom resource. This call will block until
 			// the custom resource has been created
 			params.NodeDiscovery.UpdateCiliumNodeResource()
@@ -202,7 +193,9 @@ func configureDaemon(ctx context.Context, params daemonParams) error {
 	params.K8sWatcher.InitK8sSubsystem(ctx)
 
 	// Configure and start IPAM without using the configuration yet.
-	params.IPAMInitializer.ConfigureAndStartIPAM(ctx)
+	if err := params.IPAMInitializer.ConfigureAndStartIPAM(ctx); err != nil {
+		return err
+	}
 
 	// restore endpoints before any IPs are allocated to avoid eventual IP
 	// conflicts later on, otherwise any IP conflict will result in the
@@ -250,7 +243,7 @@ func configureDaemon(ctx context.Context, params daemonParams) error {
 		return err
 	}
 
-	if err := params.IPsecAgent.StartBackgroundJobs(params.NodeHandler); err != nil {
+	if err := params.IPsecAgent.StartBackgroundJobs(params.Orchestrator.DatapathInitialized()); err != nil {
 		params.Logger.Error("Unable to start IPsec key watcher", logfields.Error, err)
 	}
 
@@ -323,10 +316,12 @@ func unloadDNSPolicies(params daemonParams) {
 			"Triggering policy recalculation to remove DNS rules due to option",
 			logfields.Option, option.DNSPolicyUnloadOnShutdown,
 		)
-		params.Policy.BumpRevision()
 		regenerationMetadata := &regeneration.ExternalRegenerationMetadata{
-			Reason:            "unloading DNS rules on graceful shutdown",
+			Reason:            regeneration.ReasonDaemonConfigUpdate,
+			Message:           "unloading DNS rules on graceful shutdown",
 			RegenerationLevel: regeneration.RegenerateWithoutDatapath,
+
+			PolicyRevisionToWaitFor: params.Policy.BumpRevision(),
 		}
 		wg := params.EndpointManager.RegenerateAllEndpoints(regenerationMetadata)
 		wg.Wait()

@@ -100,7 +100,7 @@ func makeRequestWithCount(t *testing.T, exp *http.ExpectedResponse, count int) [
 
 	// if the deprecated field StatusCode is set, append it to StatusCodes for backwards compatibility
 	//nolint:staticcheck
-	if exp.Response.StatusCode != 0 {
+	if exp.Response.StatusCode != 0 && !slices.Contains(exp.Response.StatusCodes, exp.Response.StatusCode) {
 		exp.Response.StatusCodes = append(exp.Response.StatusCodes, exp.Response.StatusCode)
 	}
 
@@ -240,7 +240,7 @@ func (m *MeshPod) request(args []string) (Response, error) {
 }
 
 func ConnectToApp(t *testing.T, s *suite.ConformanceTestSuite, app MeshApplication) MeshPod {
-	return ConnectToAppInNamespace(t, s, app, "gateway-conformance-mesh")
+	return ConnectToAppInNamespace(t, s, app, suite.MeshNamespace)
 }
 
 func ConnectToAppInNamespace(t *testing.T, s *suite.ConformanceTestSuite, app MeshApplication, ns string) MeshPod {

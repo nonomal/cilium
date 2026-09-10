@@ -648,17 +648,20 @@ func remoteClusterStatusToError(status *models.RemoteCluster) error {
 		return errConfigRequiredNotRetrieved
 	case status.Synced == nil:
 		return errors.New("synchronization status unknown")
-	case !(status.Synced.Nodes && status.Synced.Endpoints && status.Synced.Identities && status.Synced.Services):
+	case !(status.Synced.Nodes && status.Synced.Endpoints && status.Synced.Identities && status.Synced.Services &&
+		(status.Synced.ServiceExports == nil || *status.Synced.ServiceExports)):
 		var toSync []string
-		appendNotSynced := func(name string, synced bool) {
-			if !synced {
+		appendNotSynced := func(name string, synced *bool) {
+			if synced != nil && !*synced {
 				toSync = append(toSync, name)
 			}
 		}
-		appendNotSynced("endpoints", status.Synced.Endpoints)
-		appendNotSynced("identities", status.Synced.Identities)
-		appendNotSynced("nodes", status.Synced.Nodes)
-		appendNotSynced("services", status.Synced.Services)
+		appendNotSynced("endpoints", &status.Synced.Endpoints)
+		appendNotSynced("identities", &status.Synced.Identities)
+		appendNotSynced("nodes", &status.Synced.Nodes)
+		appendNotSynced("services", &status.Synced.Services)
+		appendNotSynced("service-exports", status.Synced.ServiceExports)
+		appendNotSynced("endpoint-slices", status.Synced.EndpointSlices)
 
 		return fmt.Errorf("synchronization in progress for %s", strings.Join(toSync, ", "))
 	default:
@@ -981,12 +984,11 @@ func (k *K8sClusterMesh) outputConnectivityStatus(agents, kvstoremesh *Connectiv
 	}
 }
 
-func log(format string, a ...any) {
-	// TODO (ajs): make logger configurable
-	fmt.Fprintf(os.Stdout, format+"\n", a...)
-}
-
 func generateEnableHelmValues(params Parameters, flavor k8s.Flavor) (map[string]any, error) {
+	log := func(format string, a ...any) {
+		fmt.Fprintf(params.Writer, format+"\n", a...)
+	}
+
 	helmVals := map[string]any{
 		"clustermesh": map[string]any{
 			"useAPIServer": true,
@@ -1002,7 +1004,7 @@ func generateEnableHelmValues(params Parameters, flavor k8s.Flavor) (map[string]
 			log("🔮 Auto-exposing service within GCP VPC (networking.gke.io/load-balancer-type=Internal)")
 			helmVals["clustermesh"].(map[string]any)["apiserver"] = map[string]any{
 				"service": map[string]any{
-					"type": corev1.ServiceTypeLoadBalancer,
+					"type": string(corev1.ServiceTypeLoadBalancer),
 					"annotations": map[string]any{
 						"networking.gke.io/load-balancer-type": "Internal",
 						// Allows cross-region access
@@ -1014,7 +1016,7 @@ func generateEnableHelmValues(params Parameters, flavor k8s.Flavor) (map[string]
 			log("🔮 Auto-exposing service within Azure VPC (service.beta.kubernetes.io/azure-load-balancer-internal)")
 			helmVals["clustermesh"].(map[string]any)["apiserver"] = map[string]any{
 				"service": map[string]any{
-					"type": corev1.ServiceTypeLoadBalancer,
+					"type": string(corev1.ServiceTypeLoadBalancer),
 					"annotations": map[string]any{
 						"service.beta.kubernetes.io/azure-load-balancer-internal": "true",
 					},
@@ -1024,7 +1026,7 @@ func generateEnableHelmValues(params Parameters, flavor k8s.Flavor) (map[string]
 			log("🔮 Auto-exposing service within AWS VPC (service.beta.kubernetes.io/aws-load-balancer-scheme: internal")
 			helmVals["clustermesh"].(map[string]any)["apiserver"] = map[string]any{
 				"service": map[string]any{
-					"type": corev1.ServiceTypeLoadBalancer,
+					"type": string(corev1.ServiceTypeLoadBalancer),
 					"annotations": map[string]any{
 						"service.beta.kubernetes.io/aws-load-balancer-scheme": "internal",
 					},
@@ -1417,7 +1419,10 @@ func (k *K8sClusterMesh) helmUpgradeClusters(ctx context.Context, client *k8s.Cl
 	var clustersRaw any
 	clustersRaw = clusters
 
-	versionStr := rel.MetadataAsMap()["Version"].(string)
+	versionStr, ok := rel.MetadataAsMap()["Version"].(string)
+	if !ok {
+		return fmt.Errorf("failed to get Helm chart version from release metadata on cluster %s", client.ClusterName())
+	}
 	version, err := versioncheck.Version(versionStr)
 	if err != nil {
 		return fmt.Errorf("Failed to parse Helm chart version %s on cluster %s: %w", versionStr, client.ClusterName(), err)
@@ -1794,11 +1799,10 @@ func getClustersFromValues(values map[string]any) (map[string]any, map[string]an
 		if !ok {
 			return nil, nil, fmt.Errorf("existing clustermesh.config.clusters is invalid")
 		}
-		if _, ok := cluster["name"]; !ok {
+		clusterName, ok := cluster["name"].(string)
+		if !ok {
 			return nil, nil, fmt.Errorf("existing clustermesh.config.clusters is invalid")
 		}
-
-		clusterName := cluster["name"].(string)
 		delete(cluster, "name")
 		clusters[clusterName] = cluster
 	}

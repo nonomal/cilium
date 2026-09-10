@@ -19,7 +19,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/defaults"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/util"
@@ -247,6 +246,42 @@ func TestEnabledFunctions(t *testing.T) {
 		IPAM: ipamOption.IPAMENI,
 	}
 	require.Equal(t, ipamOption.IPAMENI, d.IPAMMode())
+}
+
+func TestRoutingModeHelpers(t *testing.T) {
+	tests := []struct {
+		name           string
+		routingMode    string
+		expectedTunnel bool
+		expectedNative bool
+	}{
+		{
+			name:           "native mode - tunneling disabled and native routing required",
+			routingMode:    RoutingModeNative,
+			expectedTunnel: false,
+			expectedNative: true,
+		},
+		{
+			name:           "tunnel mode - tunneling enabled and native routing not required",
+			routingMode:    RoutingModeTunnel,
+			expectedTunnel: true,
+			expectedNative: false,
+		},
+		{
+			name:           "hybrid mode - tunneling enabled and native routing required",
+			routingMode:    RoutingModeHybrid,
+			expectedTunnel: true,
+			expectedNative: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &DaemonConfig{RoutingMode: tt.routingMode}
+			assert.Equal(t, tt.expectedTunnel, d.TunnelingEnabled())
+			assert.Equal(t, tt.expectedNative, d.RequiresNativeRouting())
+		})
+	}
 }
 
 func TestLocalAddressExclusion(t *testing.T) {
@@ -485,7 +520,7 @@ func TestCheckIPv4NativeRoutingCIDR(t *testing.T) {
 				EnableIPv6Masquerade:  true,
 				RoutingMode:           RoutingModeNative,
 				IPAM:                  ipamOption.IPAMAzure,
-				IPv4NativeRoutingCIDR: cidr.MustParseCIDR("10.127.64.0/18"),
+				IPv4NativeRoutingCIDR: netip.MustParsePrefix("10.127.64.0/18"),
 				EnableIPv4:            true,
 			},
 			wantErr: false,
@@ -546,6 +581,29 @@ func TestCheckIPv4NativeRoutingCIDR(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "hybrid mode with native routing cidr",
+			d: &DaemonConfig{
+				EnableIPv4Masquerade:  true,
+				EnableIPv6Masquerade:  true,
+				RoutingMode:           RoutingModeHybrid,
+				IPAM:                  ipamOption.IPAMAzure,
+				IPv4NativeRoutingCIDR: netip.MustParsePrefix("10.127.64.0/18"),
+				EnableIPv4:            true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "hybrid mode without native routing cidr requires cidr",
+			d: &DaemonConfig{
+				EnableIPv4Masquerade: true,
+				EnableIPv6Masquerade: true,
+				RoutingMode:          RoutingModeHybrid,
+				IPAM:                 ipamOption.IPAMAzure,
+				EnableIPv4:           true,
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -573,7 +631,7 @@ func TestCheckIPv6NativeRoutingCIDR(t *testing.T) {
 				EnableIPv4Masquerade:  true,
 				EnableIPv6Masquerade:  true,
 				RoutingMode:           RoutingModeNative,
-				IPv6NativeRoutingCIDR: cidr.MustParseCIDR("fd00::/120"),
+				IPv6NativeRoutingCIDR: netip.MustParsePrefix("fd00::/120"),
 				EnableIPv6:            true,
 			},
 			wantErr: false,
@@ -618,6 +676,27 @@ func TestCheckIPv6NativeRoutingCIDR(t *testing.T) {
 				EnableIPMasqAgent:    true,
 			},
 			wantErr: false,
+		},
+		{
+			name: "hybrid mode with native routing cidr",
+			d: &DaemonConfig{
+				EnableIPv4Masquerade:  true,
+				EnableIPv6Masquerade:  true,
+				RoutingMode:           RoutingModeHybrid,
+				IPv6NativeRoutingCIDR: netip.MustParsePrefix("fd00::/120"),
+				EnableIPv6:            true,
+			},
+			wantErr: false,
+		},
+		{
+			name: "hybrid mode without native routing cidr requires cidr",
+			d: &DaemonConfig{
+				EnableIPv4Masquerade: true,
+				EnableIPv6Masquerade: true,
+				RoutingMode:          RoutingModeHybrid,
+				EnableIPv6:           true,
+			},
+			wantErr: true,
 		},
 	}
 

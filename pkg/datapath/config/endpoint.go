@@ -5,30 +5,31 @@ package config
 
 import (
 	"github.com/cilium/cilium/pkg/byteorder"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
+	endpoint "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/option"
 )
 
 // Endpoint returns a [BPFLXC] for an Endpoint.
-func Endpoint(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration) any {
+func Endpoint(ep endpoint.Config, lnc *Config) any {
 	cfg := NewBPFLXC(NodeConfig(lnc))
 
 	if ep.IPv4Address().IsValid() {
-		cfg.EndpointIPv4 = ep.IPv4Address().As4()
+		cfg.EndpointIPv4.Addr = ep.IPv4Address().As4()
 	}
 	if ep.IPv6Address().IsValid() {
-		cfg.EndpointIPv6 = ep.IPv6Address().As16()
+		cfg.EndpointIPv6.Addr = ep.IPv6Address().As16()
 	}
 
 	// Netkit devices can be L2-less, meaning they operate with a zero MAC
 	// address. Unlike other L2-less devices, the ethernet header length remains
 	// at its default non-zero value.
 	em := ep.GetNodeMAC()
-	if len(em) == 6 {
-		cfg.InterfaceMAC = em.As8()
+	if em.IsValid() {
+		cfg.InterfaceMAC.Addr = em
 	}
 
 	cfg.InterfaceIfIndex = uint32(ep.GetIfIndex())
+	cfg.DeviceMTU = uint16(lnc.DeviceMTU)
 
 	cfg.EndpointID = uint16(ep.GetID())
 	cfg.EndpointNetNSCookie = ep.GetEndpointNetNsCookie()
@@ -55,6 +56,8 @@ func Endpoint(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfigur
 	cfg.EnablePolicyAccounting = lnc.EnablePolicyAccounting
 	cfg.DebugLB = ep.GetOptions().IsEnabled(option.DebugLB)
 
+	cfg.MonitorAggregation = uint8(ep.GetOptions().GetValue(option.MonitorAggregation))
+
 	if lnc.DatapathIsLayer2 {
 		cfg.EnableARPResponder = !ep.RequireARPPassthrough()
 	}
@@ -62,10 +65,12 @@ func Endpoint(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfigur
 	cfg.TunnelProtocol = lnc.TunnelProtocol
 	cfg.TunnelPort = lnc.TunnelPort
 
-	cfg.FIBTableID = ep.GetFibTableID()
+	cfg.RtInfo, _ = ep.GetRTInfo()
 
-	cfg.EnableIPv4Fragments = option.Config.EnableIPv4 && option.Config.EnableIPv4FragmentsTracking
-	cfg.EnableIPv6Fragments = option.Config.EnableIPv6 && option.Config.EnableIPv6FragmentsTracking
+	cfg.EnableIPv4Fragments = option.Config.EnableIPv4FragmentsTracking
+	cfg.EnableIPv6Fragments = option.Config.EnableIPv6FragmentsTracking
+
+	cfg.HybridRoutingEnabled = option.Config.RoutingMode == option.RoutingModeHybrid
 
 	return cfg
 }

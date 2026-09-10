@@ -120,8 +120,6 @@ func (s *healthServer) controlLoop(ctx context.Context, health cell.Health) erro
 	limiter := rate.NewLimiter(100*time.Millisecond, 1)
 	defer limiter.Stop()
 
-	defer s.cleanupListeners(ctx)
-
 	for {
 		if err := limiter.Wait(ctx); err != nil {
 			return err
@@ -202,7 +200,7 @@ func (s *healthServer) controlLoop(ctx context.Context, health cell.Health) erro
 					if !is4 {
 						beAddr = netip.IPv6Unspecified()
 					}
-					for addr := range s.params.NodeAddresses.List(wtxn, tables.NodeAddressNodePortIndex.Query(true)) {
+					for addr := range s.params.NodeAddresses.List(wtxn, tables.NodeAddressesByNodePort(true)) {
 						if is4 && addr.Addr.Is4() {
 							beAddr = addr.Addr
 							break
@@ -216,7 +214,7 @@ func (s *healthServer) controlLoop(ctx context.Context, health cell.Health) erro
 						wtxn,
 						healthServiceName,
 						source.Local,
-						lb.BackendParams{
+						lb.Backend{
 							Address: lb.NewL3n4Addr(
 								lb.TCP,
 								cmtypes.AddrClusterFrom(beAddr, 0),
@@ -238,12 +236,6 @@ func (s *healthServer) controlLoop(ctx context.Context, health cell.Health) erro
 			return nil
 		case <-watch:
 		}
-	}
-}
-
-func (s *healthServer) cleanupListeners(ctx context.Context) {
-	for _, srv := range s.serverByPort {
-		srv.shutdown(ctx)
 	}
 }
 
@@ -276,8 +268,19 @@ func (s *healthServer) addListener(svc *lb.Service, port uint16) {
 		job.OneShot(
 			fmt.Sprintf("listener-%d", port),
 			func(ctx context.Context, health cell.Health) error {
-				if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-					return err
+				errs := make(chan error, 1)
+				go func() {
+					defer close(errs)
+					errs <- srv.ListenAndServe()
+				}()
+				defer srv.Shutdown(ctx)
+				select {
+				case <-ctx.Done():
+					return nil
+				case err := <-errs:
+					if !errors.Is(err, http.ErrServerClosed) {
+						return err
+					}
 				}
 				return nil
 			},
@@ -321,7 +324,7 @@ type httpHealthServer struct {
 func (h *httpHealthServer) getLocalEndpointCount() int {
 	txn := h.db.ReadTxn()
 	svc, _, found := h.services.Get(txn, lb.ServiceByName(h.name))
-	if found && svc.ProxyRedirect != nil {
+	if found && !svc.ProxyRedirects.Empty() {
 		// Traffic is redirected to a proxy and thus we have no information on
 		// the actual backends. Return a synthetic single backend in this case.
 		return 1
@@ -329,13 +332,14 @@ func (h *httpHealthServer) getLocalEndpointCount() int {
 
 	// Gather the backends for the service.
 	activeCount := 0
-	for be := range h.backends.List(txn, lb.BackendByServiceName(h.name)) {
-		inst := be.GetInstance(h.name)
-		if inst.NodeName != "" && inst.NodeName != h.nodeName {
+	bes, _ := lb.ListBackendsByServiceName(txn, h.backends, h.name)
+	preferred := lb.PreferredBackendsByAddress(bes)
+	for be := range preferred {
+		if be.NodeName != "" && be.NodeName != h.nodeName {
 			// Skip non-local backends.
 			continue
 		}
-		if inst.State == lb.BackendStateActive {
+		if be.State == lb.BackendStateActive {
 			activeCount++
 		}
 	}

@@ -252,131 +252,7 @@ Cilium to the state it was in prior to the upgrade.
     already been explicitly used by creating new resources or by opting into
     new features via the :term:`ConfigMap`.
 
-.. _version_notes:
-.. _upgrade_version_specifics:
-
-Version Specific Notes
-======================
-
-This section details the upgrade notes specific to |CURRENT_RELEASE|. Read them
-carefully and take the suggested actions before upgrading Cilium to |CURRENT_RELEASE|.
-For upgrades to earlier releases, see the
-:prev-docs:`upgrade notes to the previous version <operations/upgrade/#upgrade-notes>`.
-
-The only tested upgrade and rollback path is between consecutive minor releases.
-Always perform upgrades and rollbacks between one minor release at a time.
-Additionally, always update to the latest patch release of your current version
-before attempting an upgrade.
-
-Tested upgrades are expected to have minimal to no impact on new and existing
-connections matched by either no Network Policies, or L3/L4 Network Policies only.
-Any traffic flowing via user space proxies (for example, because an L7 policy is
-in place, or using Ingress/Gateway API) will be disrupted during upgrade. Endpoints
-communicating via the proxy must reconnect to re-establish connections.
-
-.. _current_release_required_changes:
-
-.. _1.20_upgrade_notes:
-
-1.20 Upgrade Notes
-------------------
-
-Action Required
-~~~~~~~~~~~~~~~
-
-If you are using the following features in your environment, then you may need
-to take action because of changes to the behavior of these features. Read the
-notes carefully below to understand what to do during upgrade.
-
-* TODO
-
-Informational Notes
-~~~~~~~~~~~~~~~~~~~
-
-* TODO
-
-Changes to Features
-~~~~~~~~~~~~~~~~~~~
-
-* When using the ``KubeProxyReplacement`` for Service Loadbalancing with ``SocketLB`` either
-  disabled or configured with ``socketLB.hostNamespaceOnly=true``, in-cluster connections to
-  NodePort services by regular pods are now immediately load-balanced when network traffic leaves
-  the client pod (and not at the targeted node). This matches the behavior when SocketLB is enabled.
-  The client pod's NetworkPolicy consequently needs to allow egress traffic towards the service's
-  backends, and the backends' NetworkPolicy needs to allow ingress traffic by the client pod.
-
-New Options
-###########
-
-The following options have been introduced in this version of Cilium:
-
-* ``bpf.datapathMode=auto`` config option has been introduced. If set, Cilium will probe
-  the underlying host for netkit support and, if found, netkit mode will be selected at
-  runtime. Otherwise, Cilium will default back to the standard veth mode. This has the
-  side effect of splitting the datapath-mode into "configured mode" and "operational mode"
-  in status outputs, where they differ. The default remains ``bpf.datapathMode=veth``
-  but may change in future releases.
-
-Changed Options
-###############
-
-The following options have been modified in this version of Cilium to behave
-differently than in prior releases:
-
-* ``bpf.tproxy=true`` is incompatible with netkit datapath mode. If netkit is also enabled,
-  Cilium will fail to start. If auto-detect datapath mode is used, Cilium will revert to
-  veth mode, even if netkit support is present.
-
-Deprecated Options
-##################
-
-The following options have been deprecated in this version of Cilium. A future
-version of Cilium will remove these options, so if you use these options then
-you may need to take action to migrate to an alternative.
-
-* TODO
-
-Removed Options
-###############
-
-The following options were previously deprecated, and they are now removed
-from Cilium.
-
-* The previously deprecated Helm value ``clustermesh.enableMCSAPISupport`` was
-  removed in favor of the ``clustermesh.mcsapi.enabled`` Helm value.
-* The ``encryption.ipsec.interface`` Helm flag (the ``--encrypt-interface``
-  agent flag) was a no-op since Cilium 1.18 and has now been removed.
-
-* Support for Envoy Go Extensions (proxylib) and Kafka-aware network policies
-  has been removed. These features were deprecated in v1.18.
-
-* The Helm value ``hubble.redact.kafka.apiKey`` and the corresponding
-  ``hubble-redact-kafka-apikey`` agent flag have been removed as part of
-  dropping Kafka support.
-
-Changes to Metrics
-~~~~~~~~~~~~~~~~~~
-
-Added Metrics
-#############
-
-* TODO
-
-Changed Metrics
-###############
-
-* The ``cilium_feature_np_other_l7_policies_total`` metric no longer counts
-  Kafka policies, as Kafka-aware network policy support has been removed.
-
-Deprecated Metrics
-##################
-
-* TODO
-
-Removed Metrics
-###############
-
-* ``cilium_agent_bootstrap_seconds`` has been removed. Please use ``cilium_hive_jobs_oneshot_last_run_duration_seconds`` of respective job instead.
+.. include:: upgrade-notes.inc
 
 Advanced
 ========
@@ -403,133 +279,19 @@ available during the upgrade:
   events will be lost.
 
 
+.. _kvstore_to_crd_migration:
+
 Migrating from kvstore-backed identities to Kubernetes CRD-backed identities
 ----------------------------------------------------------------------------
 
-Beginning with Cilium 1.6, Kubernetes CRD-backed security identities can be
-used for smaller clusters. Along with other changes in 1.6, this allows
-kvstore-free operation if desired. It is possible to migrate identities from an
-existing kvstore deployment to CRD-backed identities. This minimizes
-disruptions to traffic as the update rolls out through the cluster.
-
-Migration
-~~~~~~~~~
+.. include:: /beta.rst
 
 When identities change, existing connections can be disrupted while Cilium
-initializes and synchronizes with the shared identity store. The disruption
+initializes and synchronizes with the shared identity store. This disruption
 occurs when new numeric identities are used for existing pods on some instances
-and others are used on others. When converting to CRD-backed identities, it is
-possible to pre-allocate CRD identities so that the numeric identities match
-those in the kvstore. This allows new and old Cilium instances in the rollout
-to agree.
+and others are used on others.
 
-There are two ways to achieve this: you can either run a one-off ``cilium preflight migrate-identity`` script
-which will perform a point-in-time copy of all identities from the kvstore to CRDs (added in Cilium 1.6), or use the "Double Write" identity
-allocation mode which will have Cilium manage identities in both the kvstore and CRD at the same time for a seamless migration (added in Cilium 1.17).
-
-Migration with the ``cilium preflight migrate-identity`` script
-###############################################################
-
-The ``cilium preflight migrate-identity`` script is a one-off tool that can be used to copy identities from the kvstore into CRDs.
-It has a couple of limitations:
-
-* If an identity is created in the kvstore after the one-off migration has been completed, it will not be copied into a CRD.
-  This means that you need to perform the migration on a cluster with no identity churn.
-* There is no easy way to revert back to ``--identity-allocation-mode=kvstore`` if something goes wrong after
-  Cilium has been migrated to ``--identity-allocation-mode=crd``
-
-If these limitations are not acceptable, it is recommended to use the ":ref:`Double Write <double_write_migration>`" identity allocation mode instead.
-
-The following steps show an example of performing the migration using the ``cilium preflight migrate-identity`` script.
-It is safe to re-run the command if desired. It will identify already allocated identities or ones that
-cannot be migrated. Note that identity ``34815`` is migrated, ``17003`` is
-already migrated, and ``11730`` has a conflict and a new ID allocated for those
-labels.
-
-The steps below assume a stable cluster with no new identities created during
-the rollout. Once Cilium using CRD-backed identities is running, it may begin
-allocating identities in a way that conflicts with older ones in the kvstore.
-
-The cilium preflight manifest requires etcd support and can be built with:
-
-.. cilium-helm-template::
-   :namespace: kube-system
-   :set: preflight.enabled=true
-         agent=false
-         config.enabled=false
-         operator.enabled=false
-         etcd.enabled=true
-         etcd.ssl=true
-   :post-helm-commands: > cilium-preflight.yaml
-   :post-commands: kubectl create -f cilium-preflight.yaml
-
-
-Example migration
-~~~~~~~~~~~~~~~~~
-
-.. code-block:: shell-session
-
-      $ kubectl exec -n kube-system cilium-pre-flight-check-1234 -- cilium-dbg preflight migrate-identity
-      INFO[0000] Setting up kvstore client
-      INFO[0000] Connecting to etcd server...                  config=/var/lib/cilium/etcd-config.yml endpoints="[https://192.168.60.11:2379]" subsys=kvstore
-      INFO[0000] Setting up kubernetes client
-      INFO[0000] Establishing connection to apiserver          host="https://192.168.60.11:6443" subsys=k8s
-      INFO[0000] Connected to apiserver                        subsys=k8s
-      INFO[0000] Got lease ID 29c66c67db8870c8                 subsys=kvstore
-      INFO[0000] Got lock lease ID 29c66c67db8870ca            subsys=kvstore
-      INFO[0000] Successfully verified version of etcd endpoint  config=/var/lib/cilium/etcd-config.yml endpoints="[https://192.168.60.11:2379]" etcdEndpoint="https://192.168.60.11:2379" subsys=kvstore version=3.3.13
-      INFO[0000] CRD (CustomResourceDefinition) is installed and up-to-date  name=CiliumNetworkPolicy/v2 subsys=k8s
-      INFO[0000] Updating CRD (CustomResourceDefinition)...    name=v2.CiliumEndpoint subsys=k8s
-      INFO[0001] CRD (CustomResourceDefinition) is installed and up-to-date  name=v2.CiliumEndpoint subsys=k8s
-      INFO[0001] Updating CRD (CustomResourceDefinition)...    name=v2.CiliumNode subsys=k8s
-      INFO[0002] CRD (CustomResourceDefinition) is installed and up-to-date  name=v2.CiliumNode subsys=k8s
-      INFO[0002] Updating CRD (CustomResourceDefinition)...    name=v2.CiliumIdentity subsys=k8s
-      INFO[0003] CRD (CustomResourceDefinition) is installed and up-to-date  name=v2.CiliumIdentity subsys=k8s
-      INFO[0003] Listing identities in kvstore
-      INFO[0003] Migrating identities to CRD
-      INFO[0003] Skipped non-kubernetes labels when labelling ciliumidentity. All labels will still be used in identity determination  labels="map[]" subsys=crd-allocator
-      INFO[0003] Skipped non-kubernetes labels when labelling ciliumidentity. All labels will still be used in identity determination  labels="map[]" subsys=crd-allocator
-      INFO[0003] Skipped non-kubernetes labels when labelling ciliumidentity. All labels will still be used in identity determination  labels="map[]" subsys=crd-allocator
-      INFO[0003] Migrated identity                             identity=34815 identityLabels="k8s:class=tiefighter;k8s:io.cilium.k8s.policy.cluster=default;k8s:io.cilium.k8s.policy.serviceaccount=default;k8s:io.kubernetes.pod.namespace=default;k8s:org=empire;"
-      WARN[0003] ID is allocated to a different key in CRD. A new ID will be allocated for the this key  identityLabels="k8s:class=deathstar;k8s:io.cilium.k8s.policy.cluster=default;k8s:io.cilium.k8s.policy.serviceaccount=default;k8s:io.kubernetes.pod.namespace=default;k8s:org=empire;" oldIdentity=11730
-      INFO[0003] Reusing existing global key                   key="k8s:class=deathstar;k8s:io.cilium.k8s.policy.cluster=default;k8s:io.cilium.k8s.policy.serviceaccount=default;k8s:io.kubernetes.pod.namespace=default;k8s:org=empire;" subsys=allocator
-      INFO[0003] New ID allocated for key in CRD               identity=17281 identityLabels="k8s:class=deathstar;k8s:io.cilium.k8s.policy.cluster=default;k8s:io.cilium.k8s.policy.serviceaccount=default;k8s:io.kubernetes.pod.namespace=default;k8s:org=empire;" oldIdentity=11730
-      INFO[0003] ID was already allocated to this key. It is already migrated  identity=17003 identityLabels="k8s:class=xwing;k8s:io.cilium.k8s.policy.cluster=default;k8s:io.cilium.k8s.policy.serviceaccount=default;k8s:io.kubernetes.pod.namespace=default;k8s:org=alliance;"
-
-.. note::
-
-    It is also possible to use the ``--k8s-kubeconfig-path``  and ``--kvstore-opt``
-    ``cilium`` CLI options with the preflight command. The default is to derive the
-    configuration as cilium-agent does.
-
-  .. code-block:: shell-session
-
-        cilium preflight migrate-identity --k8s-kubeconfig-path /var/lib/cilium/cilium.kubeconfig --kvstore etcd --kvstore-opt etcd.config=/var/lib/cilium/etcd-config.yml
-
-Once the migration is complete, confirm the endpoint identities match by listing the endpoints stored in CRDs and in etcd:
-
-.. code-block:: shell-session
-
-      $ kubectl get ciliumendpoints -A # new CRD-backed endpoints
-      $ kubectl exec -n kube-system cilium-1234 -- cilium-dbg endpoint list # existing etcd-backed endpoints
-
-Clearing CRD identities
-~~~~~~~~~~~~~~~~~~~~~~~
-
-If a migration has gone wrong, it possible to start with a clean slate. Ensure that no Cilium instances are running with ``--identity-allocation-mode=crd`` and execute:
-
-.. code-block:: shell-session
-
-      $ kubectl delete ciliumid --all
-
-.. _double_write_migration:
-
-Migration with the "Double Write" identity allocation mode
-##########################################################
-
-.. include:: ../beta.rst
-
-The "Double Write" Identity Allocation Mode allows Cilium to allocate identities as KVStore values *and* as CRDs at the
+To minimize disruption, the "Double Write" Identity Allocation Mode allows Cilium to allocate identities as KVStore values *and* as CRDs at the
 same time. This mode also has two versions: one where the source of truth comes from the kvstore (``--identity-allocation-mode=doublewrite-readkvstore``),
 and one where the source of truth comes from CRDs (``--identity-allocation-mode=doublewrite-readcrd``).
 
@@ -571,7 +333,7 @@ Rollout Instructions
 .. _change_policy_default_local_cluster:
 
 Preparing for a ``policy-default-local-cluster`` change
-#######################################################
+-------------------------------------------------------
 
 Cilium network policies used to implicitly select endpoints from all the clusters.
 Cilium 1.18 introduced a new option called ``policy-default-local-cluster`` which

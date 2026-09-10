@@ -4,6 +4,7 @@
 package socketlb
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -12,12 +13,13 @@ import (
 
 	"github.com/cilium/ebpf"
 
+	"github.com/cilium/cilium/api/v1/datapathplugins"
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/cgroups"
 	"github.com/cilium/cilium/pkg/datapath/config"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/maps/registry"
+	"github.com/cilium/cilium/pkg/netns"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -59,14 +61,28 @@ func cgroupLinkPath() string {
 // File to dump the socketlb BPF configuration to.
 var configDumpPath = filepath.Join(option.Config.StateDir, "bpf", socketConfig)
 
+func cgroupPluginsLinkPath() string {
+	return filepath.Join(bpf.CiliumPath(), Subsystem, "plugin_links/cgroup")
+}
+
+func attachmentContextSocket() *datapathplugins.AttachmentContext {
+	return &datapathplugins.AttachmentContext{
+		Context: &datapathplugins.AttachmentContext_Socket_{},
+	}
+}
+
+type collectionLoader interface {
+	Load(ctx context.Context, logger *slog.Logger, spec *ebpf.CollectionSpec, opts *bpf.CollectionOptions, lnc *config.Config, attachmentContext *datapathplugins.AttachmentContext, pinsDir string) (*ebpf.Collection, func() error, func(), error)
+}
+
 // Enable attaches necessary bpf programs for socketlb based on ciliums config.
 //
 // On restart, Enable can also detach unnecessary programs if specific configuration
 // options have changed.
 // It expects bpf_sock.c to be compiled previously, so that bpf_sock.o is present
 // in the Runtime dir.
-func Enable(logger *slog.Logger, reg *registry.MapRegistry,
-	sysctl sysctl.Sysctl, lnc *datapath.LocalNodeConfiguration) error {
+func Enable(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry,
+	collLoader collectionLoader, sysctl sysctl.Sysctl, lnc *config.Config) error {
 	if err := os.MkdirAll(cgroupLinkPath(), 0777); err != nil {
 		return fmt.Errorf("create bpffs link directory: %w", err)
 	}
@@ -83,16 +99,32 @@ func Enable(logger *slog.Logger, reg *registry.MapRegistry,
 	cfg.TunnelProtocol = lnc.TunnelProtocol
 	cfg.TunnelPort = lnc.TunnelPort
 
-	coll, commit, err := bpf.LoadCollection(logger, spec, &bpf.CollectionOptions{
+	if option.Config.EnableMKE && lnc.KPRConfig.KubeProxyReplacement {
+		cfg.MKEHost = option.HostExtensionMKE
+	}
+
+	if cookie, err := netns.GetNetNSCookie(); err == nil {
+		// When running in nested environments (e.g. Kind), cilium-agent does
+		// not run in the host netns. So, in such cases the cookie comparison
+		// based on bpf_get_netns_cookie(NULL) for checking whether a socket
+		// belongs to a host netns does not work.
+		//
+		// To fix this, we derive the cookie of the netns in which cilium-agent
+		// runs via getsockopt(...SO_NETNS_COOKIE...) and then use it in
+		// ctx_in_hostns(). This is based on an assumption that cilium-agent
+		// always runs with "hostNetwork: true".
+		cfg.HostNetNSCookie = cookie
+	}
+
+	coll, commit, cleanup, err := collLoader.Load(ctx, logger, spec, &bpf.CollectionOptions{
 		MapRegistry: reg,
 		Constants:   cfg,
 		CollectionOptions: ebpf.CollectionOptions{
 			Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
 		},
 		ConfigDumpPath: configDumpPath,
-	})
-	var ve *ebpf.VerifierError
-	if errors.As(err, &ve) {
+	}, lnc, attachmentContextSocket(), cgroupPluginsLinkPath())
+	if ve, ok := errors.AsType[*ebpf.VerifierError](err); ok {
 		if _, err := fmt.Fprintf(os.Stderr, "Verifier error: %s\nVerifier log: %+v\n", err, ve); err != nil {
 			return fmt.Errorf("writing verifier log to stderr: %w", err)
 		}
@@ -100,6 +132,7 @@ func Enable(logger *slog.Logger, reg *registry.MapRegistry,
 	if err != nil {
 		return fmt.Errorf("failed loading eBPF collection into the kernel: %w", err)
 	}
+	defer cleanup()
 	defer coll.Close()
 
 	// Map a program name to its enabled status. Programs disabled by default.
@@ -175,6 +208,10 @@ func Disable(logger *slog.Logger) error {
 		if err := detachCgroup(logger, p, cgroups.GetCgroupRoot(), cgroupLinkPath()); err != nil {
 			return fmt.Errorf("detach cgroup: %w", err)
 		}
+	}
+
+	if err := bpf.Remove(filepath.Join(bpf.CiliumPath(), Subsystem)); err != nil {
+		return fmt.Errorf("removing socketlb root bpffs  directory: %w", err)
 	}
 
 	return nil

@@ -20,12 +20,14 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 
 	"github.com/cilium/cilium/daemon/cmd/legacy"
+	"github.com/cilium/cilium/pkg/datapath/connector"
+	ipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/types"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpoint"
 	endpointapi "github.com/cilium/cilium/pkg/endpoint/api"
 	endpointcreator "github.com/cilium/cilium/pkg/endpoint/creator"
 	endpointmetadata "github.com/cilium/cilium/pkg/endpoint/metadata"
+	endpointtypes "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/endpointstate"
 	"github.com/cilium/cilium/pkg/ipam"
@@ -88,13 +90,13 @@ type endpointRestorerParams struct {
 	EndpointRegenerator *endpoint.Regenerator
 	EndpointMetadata    endpointmetadata.EndpointMetadataFetcher
 	EndpointAPIFence    endpointapi.Fence
-	IPSecAgent          datapath.IPsecAgent
+	IPSecAgent          ipsec.Agent
 	IPAMManager         *ipam.IPAM
 	CacheStatus         k8sSynced.CacheStatus
 	DirReadStatus       policyDirectory.DirectoryWatcherReadStatus
 	IPCache             *ipcache.IPCache
 	LXCMap              lxcmap.Map
-	ConnectorConfig     datapath.ConnectorConfig
+	ConnectorConfig     connector.Config
 }
 
 type endpointRestorer struct {
@@ -107,10 +109,10 @@ type endpointRestorer struct {
 	endpointRegenerator *endpoint.Regenerator
 	endpointMetadata    endpointmetadata.EndpointMetadataFetcher
 	endpointAPIFence    endpointapi.Fence
-	ipSecAgent          datapath.IPsecAgent
+	ipSecAgent          ipsec.Agent
 	ipamManager         *ipam.IPAM
 	lxcMap              lxcmap.Map
-	connectorConfig     datapath.ConnectorConfig
+	connectorConfig     connector.Config
 
 	cacheStatus   k8sSynced.CacheStatus
 	dirReadStatus policyDirectory.DirectoryWatcherReadStatus
@@ -251,7 +253,7 @@ func (r *endpointRestorer) validateDatapathModeCompatibility(endpoints map[uint1
 		}
 
 		// Skip fake endpoints
-		if ep.IsProperty(endpoint.PropertyFakeEndpoint) {
+		if ep.IsProperty(endpointtypes.PropertyFakeEndpoint) {
 			continue
 		}
 
@@ -295,35 +297,35 @@ func (r *endpointRestorer) validateDatapathModeCompatibility(endpoints map[uint1
 // responsible for its workload, etc.
 //
 // Returns true to indicate that the endpoint is valid to restore, and an
-// optional error.
-func (r *endpointRestorer) validateEndpoint(ep *endpoint.Endpoint) (valid bool, err error) {
-	if ep.IsProperty(endpoint.PropertyFakeEndpoint) {
-		return true, nil
+// optional error. In case the endpoint is invalid for restore, `cleanup`
+// indicates if the endpoint state should be purged by the caller.
+func (r *endpointRestorer) validateEndpoint(ep *endpoint.Endpoint) (valid, cleanup bool, err error) {
+	if ep.IsProperty(endpointtypes.PropertyFakeEndpoint) {
+		return true, false, nil
 	}
 
-	// On each restart, the health endpoint is supposed to be recreated.
-	// Hence we need to clean health endpoint state unconditionally.
-	if ep.HasLabels(labels.LabelHealth) {
-		// Ignore health endpoint and don't report
-		// it as not restored. But we need to clean up the old
-		// state files, so do this now.
-		healthStateDir := ep.StateDirectoryPath()
-		r.logger.Debug("Removing old health endpoint state directory",
+	// On each restart, the health and ingress endpoints are supposed to be recreated.
+	// Hence we need to clean endpoint state unconditionally and skip restore.
+	if ep.HasLabels(labels.LabelHealth) || ep.HasLabels(labels.LabelIngress) {
+		epStateDir := ep.StateDirectoryPath()
+		r.logger.Debug("Removing old endpoint state directory",
 			logfields.EndpointID, ep.ID,
-			logfields.Path, healthStateDir,
+			logfields.Labels, ep.GetLabels(),
+			logfields.Path, epStateDir,
 		)
-		if err := os.RemoveAll(healthStateDir); err != nil {
-			r.logger.Warn("Cannot clean up old health state directory",
+		if err := os.RemoveAll(epStateDir); err != nil {
+			r.logger.Warn("Cannot clean up old endpoint state directory",
 				logfields.EndpointID, ep.ID,
-				logfields.Path, healthStateDir,
+				logfields.Path, epStateDir,
 			)
 		}
-		return false, nil
+		// Skip restore and cleanup for reserved endpoints.
+		return false, false, nil
 	}
 
 	if ep.K8sPodName != "" && ep.K8sNamespace != "" && r.clientset.IsEnabled() {
 		if err := r.getPodForEndpoint(ep); err != nil {
-			return false, err
+			return false, true, err
 		}
 
 		// Initialize the endpoint's event queue because the following call to
@@ -336,16 +338,16 @@ func (r *endpointRestorer) validateEndpoint(ep *endpoint.Endpoint) (valid bool, 
 	}
 
 	if err := ep.ValidateConnectorPlumbing(r.checkLink); err != nil {
-		return false, err
+		return false, true, err
 	}
 
 	if !ep.DatapathConfiguration.ExternalIpam {
 		if err := r.allocateIPsLocked(ep); err != nil {
-			return false, fmt.Errorf("Failed to re-allocate IP of endpoint: %w", err)
+			return false, true, fmt.Errorf("Failed to re-allocate IP of endpoint: %w", err)
 		}
 	}
 
-	return true, nil
+	return true, false, nil
 }
 
 func (r *endpointRestorer) getPodForEndpoint(ep *endpoint.Endpoint) error {
@@ -466,12 +468,14 @@ func (r *endpointRestorer) RestoreOldEndpoints() error {
 			scopedLog = scopedLog.With(logfields.CEPName, ep.GetK8sNamespaceAndCEPName())
 		}
 
-		restore, err := r.validateEndpoint(ep)
+		restore, cleanup, err := r.validateEndpoint(ep)
 		if err != nil {
 			// Disconnected EPs are not failures, clean them silently below
 			if !ep.IsDisconnecting() {
 				r.endpointManager.DeleteK8sCiliumEndpointSync(ep)
-				scopedLog.Warn("Unable to restore endpoint, ignoring", logfields.Error, err)
+				scopedLog.Warn("Unable to restore endpoint, ignoring",
+					logfields.Labels, ep.GetLabels(),
+					logfields.Error, err)
 				failed++
 			} else {
 				skipped++
@@ -481,7 +485,9 @@ func (r *endpointRestorer) RestoreOldEndpoints() error {
 			if err == nil {
 				skipped++
 			}
-			r.restoreState.toClean = append(r.restoreState.toClean, ep)
+			if cleanup {
+				r.restoreState.toClean = append(r.restoreState.toClean, ep)
+			}
 			continue
 		}
 
@@ -538,9 +544,7 @@ func (r *endpointRestorer) regenerateRestoredEndpoints(state *endpointRestoreSta
 	// purpose, all endpoints being restored must already be in the
 	// endpoint list.
 	startTimeRestore := time.Now()
-	for i := len(state.restored) - 1; i >= 0; i-- {
-		ep := state.restored[i]
-
+	for i, ep := range slices.Backward(state.restored) {
 		// Insert into endpoint manager so it can be regenerated when calls to
 		// RegenerateAllEndpoints() are made. This must be done synchronously (i.e.,
 		// not in a goroutine) because regenerateRestoredEndpoints must guarantee
@@ -688,21 +692,21 @@ func (r *endpointRestorer) handleRestoredEndpointsRegeneration(endpoints []*endp
 func (r *endpointRestorer) allocateIPsLocked(ep *endpoint.Endpoint) (err error) {
 	if option.Config.EnableIPv6 && ep.IPv6.IsValid() {
 		ipv6Pool := ipam.PoolOrDefault(ep.IPv6IPAMPool)
-		_, err = r.ipamManager.AllocateIPWithoutSyncUpstream(ep.IPv6.AsSlice(), ep.HumanString()+" [restored]", ipv6Pool)
+		_, err = r.ipamManager.AllocateIPWithoutSyncUpstream(ep.IPv6, ep.HumanString()+" [restored]", ipv6Pool)
 		if err != nil {
 			return fmt.Errorf("unable to reallocate %s IPv6 address: %w", ep.IPv6, err)
 		}
 
 		defer func() {
 			if err != nil {
-				r.ipamManager.ReleaseIP(ep.IPv6.AsSlice(), ipv6Pool)
+				r.ipamManager.ReleaseIP(ep.IPv6, ipv6Pool)
 			}
 		}()
 	}
 
 	if option.Config.EnableIPv4 && ep.IPv4.IsValid() {
 		ipv4Pool := ipam.PoolOrDefault(ep.IPv4IPAMPool)
-		_, err = r.ipamManager.AllocateIPWithoutSyncUpstream(ep.IPv4.AsSlice(), ep.HumanString()+" [restored]", ipv4Pool)
+		_, err = r.ipamManager.AllocateIPWithoutSyncUpstream(ep.IPv4, ep.HumanString()+" [restored]", ipv4Pool)
 		switch {
 		// We only check for BypassIPAllocUponRestore for IPv4 because we
 		// assume that this flag is only turned on for IPv4-only IPAM modes
@@ -712,7 +716,7 @@ func (r *endpointRestorer) allocateIPsLocked(ep *endpoint.Endpoint) (err error) 
 		// https://github.com/cilium/cilium/pull/15453. Other errors are not
 		// bypassed.
 		case err != nil &&
-			errors.Is(err, ipam.NewIPNotAvailableInPoolError(ep.IPv4.AsSlice())) &&
+			errors.Is(err, ipam.NewIPNotAvailableInPoolError(ep.IPv4)) &&
 			option.Config.BypassIPAvailabilityUponRestore:
 			r.logger.Warn(
 				"Bypassing IP not available error on endpoint restore. This is "+

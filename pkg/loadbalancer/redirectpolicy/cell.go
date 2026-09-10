@@ -8,7 +8,7 @@ import (
 	"github.com/cilium/statedb"
 
 	"github.com/cilium/cilium/api/v1/server/restapi/service"
-	daemonk8s "github.com/cilium/cilium/daemon/k8s"
+	k8sTables "github.com/cilium/cilium/pkg/k8s/tables"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 	lb "github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/metrics"
@@ -40,6 +40,9 @@ var Cell = cell.Module(
 
 		// Provide the 'skiplbmap' command for inspecting SkipLBMap.
 		newSkipLBMapCommand,
+
+		// Provide the 'lrp/list' command for inspecting the LRP REST API model.
+		newLRPListCommand,
 	),
 
 	cell.ProvidePrivate(
@@ -70,10 +73,17 @@ func lrpAPI(
 	enabled lrpIsEnabled,
 	db *statedb.DB,
 	lrps statedb.Table[*LocalRedirectPolicy],
+	frontends statedb.Table[*lb.Frontend],
 	backends statedb.Table[*lb.Backend],
-	pods statedb.Table[daemonk8s.LocalPod],
+	pods statedb.Table[k8sTables.LocalPod],
 ) service.GetLrpHandler {
-	return &getLrpHandler{db, lrps, backends, pods}
+	return &getLrpHandler{
+		db:        db,
+		lrps:      lrps,
+		frontends: frontends,
+		backends:  backends,
+		pods:      pods,
+	}
 }
 
 type lrpIsEnabled bool

@@ -16,6 +16,7 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
@@ -23,7 +24,6 @@ import (
 	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	nm "github.com/cilium/cilium/pkg/node/manager"
-	"github.com/cilium/cilium/pkg/node/types"
 )
 
 type k8sCiliumNodeWatcherParams struct {
@@ -37,6 +37,7 @@ type k8sCiliumNodeWatcherParams struct {
 	K8sAPIGroups      *k8sSynced.APIGroups
 
 	NodeManager nm.NodeManager
+	ClusterInfo cmtypes.ClusterInfo
 }
 
 func newK8sCiliumNodeWatcher(params k8sCiliumNodeWatcherParams) *K8sCiliumNodeWatcher {
@@ -47,6 +48,7 @@ func newK8sCiliumNodeWatcher(params k8sCiliumNodeWatcherParams) *K8sCiliumNodeWa
 		k8sAPIGroups:      params.K8sAPIGroups,
 		ciliumNode:        params.CiliumNode,
 		nodeManager:       params.NodeManager,
+		clusterInfo:       params.ClusterInfo,
 	}
 }
 
@@ -65,6 +67,7 @@ type K8sCiliumNodeWatcher struct {
 	ciliumNode   resource.Resource[*cilium_v2.CiliumNode]
 
 	nodeManager nodeManager
+	clusterInfo cmtypes.ClusterInfo
 
 	ciliumNodeStore atomic.Pointer[resource.Store[*cilium_v2.CiliumNode]]
 }
@@ -123,7 +126,7 @@ func (k *K8sCiliumNodeWatcher) onCiliumNodeInsert(ciliumNode *cilium_v2.CiliumNo
 	if k8s.IsLocalCiliumNode(ciliumNode) {
 		return false
 	}
-	n := types.ParseCiliumNode(ciliumNode)
+	n := k8s.ParseCiliumNode(ciliumNode, k.clusterInfo)
 	k.nodeManager.NodeUpdated(n)
 	return true
 }
@@ -142,7 +145,7 @@ func (k *K8sCiliumNodeWatcher) onCiliumNodeDelete(ciliumNode *cilium_v2.CiliumNo
 	if k8s.IsLocalCiliumNode(ciliumNode) {
 		return
 	}
-	n := types.ParseCiliumNode(ciliumNode)
+	n := k8s.ParseCiliumNode(ciliumNode, k.clusterInfo)
 	k.nodeManager.NodeDeleted(n)
 }
 

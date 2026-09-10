@@ -5,7 +5,6 @@ package policy
 
 import (
 	"fmt"
-	"strings"
 	"testing"
 
 	"github.com/cilium/hive/hivetest"
@@ -56,7 +55,7 @@ func TestL4Policy(t *testing.T) {
 	}
 
 	// Transform to PolicyEntries and set priority level to 0.5
-	require.NoError(t, rule1.Sanitize())
+	require.NoError(t, rule1.ValidateAndSanitize())
 	entries := utils.RulesToPolicyEntries(api.Rules{rule1})
 	require.Len(t, entries, 2)
 	for i := range entries {
@@ -81,32 +80,32 @@ func TestL4Policy(t *testing.T) {
 	}
 
 	expected := NewL4Policy(0)
-	expected.Ingress.PortRules[0].Upsert("80", 0, "TCP", &L4Filter{
+	expected.Ingress.PortRules[0].upsert(&L4Filter{
 		Port: 80, Protocol: api.ProtoTCP, U8Proto: 6,
 		wildcard:            td.wildcardCachedSelector,
 		PerSelectorPolicies: l7map, Ingress: true,
 		RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.wildcardCachedSelector: {nil}}),
 	})
-	expected.Ingress.PortRules[0].Upsert("8080", 0, "TCP", &L4Filter{
+	expected.Ingress.PortRules[0].upsert(&L4Filter{
 		Port: 8080, Protocol: api.ProtoTCP, U8Proto: 6,
 		wildcard:            td.wildcardCachedSelector,
 		PerSelectorPolicies: l7map, Ingress: true,
 		RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.wildcardCachedSelector: {nil}}),
 	})
 
-	expected.Egress.PortRules[0].Upsert("3000", 0, "TCP", &L4Filter{
+	expected.Egress.PortRules[0].upsert(&L4Filter{
 		Port: 3000, Protocol: api.ProtoTCP, U8Proto: 6, Ingress: false,
 		wildcard:            td.wildcardCachedSelector,
 		PerSelectorPolicies: l7mapLevelOnly,
 		RuleOrigin:          OriginForTest(map[CachedSelector]labels.LabelArrayList{td.wildcardCachedSelector: {nil}}),
 	})
-	expected.Egress.PortRules[0].Upsert("3000", 0, "UDP", &L4Filter{
+	expected.Egress.PortRules[0].upsert(&L4Filter{
 		Port: 3000, Protocol: api.ProtoUDP, U8Proto: 17, Ingress: false,
 		wildcard:            td.wildcardCachedSelector,
 		PerSelectorPolicies: l7mapLevelOnly,
 		RuleOrigin:          OriginForTest(map[CachedSelector]labels.LabelArrayList{td.wildcardCachedSelector: {nil}}),
 	})
-	expected.Egress.PortRules[0].Upsert("3000", 0, "SCTP", &L4Filter{
+	expected.Egress.PortRules[0].upsert(&L4Filter{
 		Port: 3000, Protocol: api.ProtoSCTP, U8Proto: 132, Ingress: false,
 		wildcard:            td.wildcardCachedSelector,
 		PerSelectorPolicies: l7mapLevelOnly,
@@ -152,7 +151,7 @@ func TestL4Policy(t *testing.T) {
 	}
 
 	expected = NewL4Policy(0)
-	expected.Ingress.PortRules[0].Upsert("80", 0, "TCP", &L4Filter{
+	expected.Ingress.PortRules[0].upsert(&L4Filter{
 		Port:     80,
 		Protocol: api.ProtoTCP,
 		U8Proto:  6,
@@ -170,7 +169,7 @@ func TestL4Policy(t *testing.T) {
 		Ingress:    true,
 		RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.wildcardCachedSelector: {nil}}),
 	})
-	expected.Egress.PortRules[0].Upsert("3000", 0, "TCP", &L4Filter{
+	expected.Egress.PortRules[0].upsert(&L4Filter{
 		Port: 3000, Protocol: api.ProtoTCP, U8Proto: 6, Ingress: false,
 		wildcard: td.wildcardCachedSelector,
 		PerSelectorPolicies: L7DataMap{
@@ -178,7 +177,7 @@ func TestL4Policy(t *testing.T) {
 		},
 		RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.wildcardCachedSelector: {nil}}),
 	})
-	expected.Egress.PortRules[0].Upsert("3000", 0, "UDP", &L4Filter{
+	expected.Egress.PortRules[0].upsert(&L4Filter{
 		Port: 3000, Protocol: api.ProtoUDP, U8Proto: 17, Ingress: false,
 		wildcard: td.wildcardCachedSelector,
 		PerSelectorPolicies: L7DataMap{
@@ -186,7 +185,7 @@ func TestL4Policy(t *testing.T) {
 		},
 		RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.wildcardCachedSelector: {nil}}),
 	})
-	expected.Egress.PortRules[0].Upsert("3000", 0, "SCTP", &L4Filter{
+	expected.Egress.PortRules[0].upsert(&L4Filter{
 		Port: 3000, Protocol: api.ProtoSCTP, U8Proto: 132, Ingress: false,
 		wildcard: td.wildcardCachedSelector,
 		PerSelectorPolicies: L7DataMap{
@@ -196,6 +195,72 @@ func TestL4Policy(t *testing.T) {
 	})
 
 	td.policyMapEquals(t, expected.Ingress.PortRules, expected.Egress.PortRules, &rule2)
+}
+
+func TestMergePortProtoRejectsDifferentTiers(t *testing.T) {
+	td := newTestData(t, hivetest.Logger(t))
+
+	existingFilter := &L4Filter{
+		Tier:                0,
+		PerSelectorPolicies: L7DataMap{},
+		RuleOrigin:          OriginForTest(map[CachedSelector]labels.LabelArrayList{}),
+	}
+	filterToMerge := &L4Filter{
+		Tier:                1,
+		PerSelectorPolicies: L7DataMap{},
+		RuleOrigin:          OriginForTest(map[CachedSelector]labels.LabelArrayList{}),
+	}
+
+	err := existingFilter.mergePortProto(td.testPolicyContext, filterToMerge)
+	require.ErrorContains(t, err, "cannot merge filters with different tiers")
+}
+
+func TestMergePortProtoIdenticalPolicyDifferentPriority(t *testing.T) {
+	td := newTestData(t, hivetest.Logger(t))
+	cs := td.cachedSelectorA
+
+	existingOrigin := OriginForTest(map[CachedSelector]labels.LabelArrayList{
+		cs: {labels.LabelArray{labels.ParseLabel("existing")}},
+	})
+	newOrigin := OriginForTest(map[CachedSelector]labels.LabelArrayList{
+		cs: {labels.LabelArray{labels.ParseLabel("new")}},
+	})
+	expectedOrigin := newOrigin[cs]
+
+	existingFilter := &L4Filter{
+		Tier:     0,
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  u8proto.TCP,
+		Ingress:  true,
+		PerSelectorPolicies: L7DataMap{
+			cs: &PerSelectorPolicy{
+				Verdict:  types.Allow,
+				Priority: 50,
+			},
+		},
+		RuleOrigin: existingOrigin,
+	}
+	filterToMerge := &L4Filter{
+		Tier:     0,
+		Port:     80,
+		Protocol: api.ProtoTCP,
+		U8Proto:  u8proto.TCP,
+		Ingress:  true,
+		PerSelectorPolicies: L7DataMap{
+			cs: &PerSelectorPolicy{
+				Verdict:  types.Allow,
+				Priority: 10,
+			},
+		},
+		RuleOrigin: newOrigin,
+	}
+
+	err := existingFilter.mergePortProto(td.testPolicyContext, filterToMerge)
+	require.NoError(t, err)
+
+	require.Equal(t, types.Priority(10), existingFilter.PerSelectorPolicies[cs].GetPriority())
+	require.Equal(t, expectedOrigin, existingFilter.RuleOrigin[cs])
 }
 
 func TestMergeL4PolicyIngress(t *testing.T) {
@@ -444,10 +509,10 @@ func TestRuleWithNoEndpointSelector(t *testing.T) {
 				IngressCommonRule: api.IngressCommonRule{
 					FromCIDR: []api.CIDR{
 						"10.0.1.0/24",
-						"192.168.2.0",
-						"10.0.3.1",
+						"192.168.2.0/32",
+						"10.0.3.1/32",
 						"2001:db8::1/48",
-						"2001:db9::",
+						"2001:db9::/128",
 					},
 				},
 			},
@@ -468,7 +533,7 @@ func TestRuleWithNoEndpointSelector(t *testing.T) {
 		},
 	}
 
-	err := apiRule1.Sanitize()
+	err := apiRule1.ValidateAndSanitize()
 	require.Error(t, err)
 }
 
@@ -481,10 +546,10 @@ func TestL3Policy(t *testing.T) {
 				IngressCommonRule: api.IngressCommonRule{
 					FromCIDR: []api.CIDR{
 						"10.0.1.0/24",
-						"192.168.2.0",
-						"10.0.3.1",
+						"192.168.2.0/32",
+						"10.0.3.1/32",
 						"2001:db8::1/48",
-						"2001:db9::",
+						"2001:db9::/128",
 					},
 				},
 			},
@@ -505,7 +570,7 @@ func TestL3Policy(t *testing.T) {
 		},
 	}
 
-	err := apiRule1.Sanitize()
+	err := apiRule1.ValidateAndSanitize()
 	require.NoError(t, err)
 
 	// Must be parsable, make sure Validate fails when not.
@@ -516,7 +581,7 @@ func TestL3Policy(t *testing.T) {
 				FromCIDR: []api.CIDR{"10.0.1..0/24"},
 			},
 		}},
-	}).Sanitize()
+	}).Validate()
 	require.Error(t, err)
 
 	// Test CIDRRule with no provided CIDR or ExceptionCIDR.
@@ -528,7 +593,7 @@ func TestL3Policy(t *testing.T) {
 				FromCIDRSet: []api.CIDRRule{{Cidr: "", ExceptCIDRs: nil}},
 			},
 		}},
-	}).Sanitize()
+	}).Validate()
 	require.Error(t, err)
 
 	// Test CIDRRule with only CIDR provided; should not fail, as ExceptionCIDR
@@ -540,7 +605,7 @@ func TestL3Policy(t *testing.T) {
 				FromCIDRSet: []api.CIDRRule{{Cidr: "10.0.1.0/24", ExceptCIDRs: nil}},
 			},
 		}},
-	}).Sanitize()
+	}).Validate()
 	require.NoError(t, err)
 
 	// Cannot provide just an IP to a CIDRRule; Cidr must be of format
@@ -552,7 +617,7 @@ func TestL3Policy(t *testing.T) {
 				FromCIDRSet: []api.CIDRRule{{Cidr: "10.0.1.32", ExceptCIDRs: nil}},
 			},
 		}},
-	}).Sanitize()
+	}).Validate()
 	require.Error(t, err)
 
 	// Cannot exclude a range that is not part of the CIDR.
@@ -563,7 +628,7 @@ func TestL3Policy(t *testing.T) {
 				FromCIDRSet: []api.CIDRRule{{Cidr: "10.0.0.0/10", ExceptCIDRs: []api.CIDR{"10.64.0.0/11"}}},
 			},
 		}},
-	}).Sanitize()
+	}).Validate()
 	require.Error(t, err)
 
 	// Must have a contiguous mask, make sure Validate fails when not.
@@ -574,7 +639,7 @@ func TestL3Policy(t *testing.T) {
 				FromCIDR: []api.CIDR{"10.0.1.0/128.0.0.128"},
 			},
 		}},
-	}).Sanitize()
+	}).Validate()
 	require.Error(t, err)
 
 	// Prefix length must be in range for the address, make sure
@@ -586,7 +651,7 @@ func TestL3Policy(t *testing.T) {
 				FromCIDR: []api.CIDR{"10.0.1.0/34"},
 			},
 		}},
-	}).Sanitize()
+	}).Validate()
 	require.Error(t, err)
 }
 
@@ -619,7 +684,7 @@ func TestICMPPolicy(t *testing.T) {
 		},
 	}
 
-	expectedIn := NewL4PolicyMapWithValues(map[string]*L4Filter{"ICMP/8": {
+	expectedIn := NewL4PolicyMapWithValues(map[string]*L4Filter{"8/ICMP": {
 		Port:     8,
 		Protocol: api.ProtoICMP,
 		U8Proto:  u8proto.ProtoIDs["icmp"],
@@ -631,7 +696,7 @@ func TestICMPPolicy(t *testing.T) {
 		RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.wildcardCachedSelector: {nil}}),
 	}})
 
-	expectedOut := NewL4PolicyMapWithValues(map[string]*L4Filter{"ICMP/9": {
+	expectedOut := NewL4PolicyMapWithValues(map[string]*L4Filter{"9/ICMP": {
 		Port:     9,
 		Protocol: api.ProtoICMP,
 		U8Proto:  u8proto.ProtoIDs["icmp"],
@@ -666,7 +731,7 @@ func TestICMPPolicy(t *testing.T) {
 	}
 
 	expected := NewL4PolicyMapWithValues(map[string]*L4Filter{
-		"ICMP/8": {
+		"8/ICMP": {
 			Port:     8,
 			Protocol: api.ProtoICMP,
 			U8Proto:  u8proto.ProtoIDs["icmp"],
@@ -677,7 +742,7 @@ func TestICMPPolicy(t *testing.T) {
 			},
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{td.wildcardCachedSelector: {nil}}),
 		},
-		"TCP/80": {
+		"80/TCP": {
 			Port:     80,
 			Protocol: api.ProtoTCP,
 			U8Proto:  u8proto.ProtoIDs["tcp"],
@@ -708,10 +773,10 @@ func TestICMPPolicy(t *testing.T) {
 		},
 	}
 
-	expected = NewL4PolicyMapWithValues(map[string]*L4Filter{"ICMPV6/128": {
+	expected = NewL4PolicyMapWithValues(map[string]*L4Filter{"128/ICMPV6": {
 		Port:     128,
 		Protocol: api.ProtoICMPv6,
-		U8Proto:  u8proto.ProtoIDs["icmp"],
+		U8Proto:  u8proto.ICMPv6,
 		Ingress:  true,
 		wildcard: td.wildcardCachedSelector,
 		PerSelectorPolicies: L7DataMap{
@@ -765,7 +830,7 @@ func TestIPProtocolsWithNoTransportPorts(t *testing.T) {
 	}
 
 	expectedIn := NewL4PolicyMapWithValues(map[string]*L4Filter{
-		"0/vrrp": {
+		"0/VRRP": {
 			Port:     0,
 			Protocol: api.ProtoVRRP,
 			U8Proto:  u8proto.ProtoIDs["vrrp"],
@@ -793,10 +858,134 @@ func TestIPProtocolsWithNoTransportPorts(t *testing.T) {
 		},
 	})
 
-	expectedOut := NewL4PolicyMapWithValues(map[string]*L4Filter{"0/egress": {
+	expectedOut := NewL4PolicyMapWithValues(map[string]*L4Filter{"0/VRRP": {
 		Port:     0,
 		Protocol: api.ProtoVRRP,
 		U8Proto:  u8proto.ProtoIDs["vrrp"],
+		Ingress:  false,
+		wildcard: td.wildcardCachedSelector,
+		PerSelectorPolicies: L7DataMap{
+			td.wildcardCachedSelector: nil,
+		},
+		RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
+			td.wildcardCachedSelector: {nil},
+		}),
+	}})
+
+	td.policyMapEquals(t, expectedIn, expectedOut, &rule1)
+}
+
+func TestTunnelProtocolsWithNoTransportPorts(t *testing.T) {
+	old := option.Config.EnableExtendedIPProtocols
+	option.Config.EnableExtendedIPProtocols = true
+	t.Cleanup(func() {
+		option.Config.EnableExtendedIPProtocols = old
+	})
+	td := newTestData(t, hivetest.Logger(t))
+
+	// Test tunnel/encapsulation protocols: GRE, IPIP, IPV6, ESP, AH
+	rule1 := api.Rule{
+		EndpointSelector: endpointSelectorA,
+		Ingress: []api.IngressRule{
+			{
+				ToPorts: []api.PortRule{
+					{
+						Ports: []api.PortProtocol{
+							{Protocol: api.ProtoGRE},
+							{Protocol: api.ProtoIPIP},
+							{Protocol: api.ProtoIPv6},
+							{Protocol: api.ProtoESP},
+							{Protocol: api.ProtoAH},
+						},
+					},
+				},
+			},
+		},
+		Egress: []api.EgressRule{
+			{
+				ToPorts: []api.PortRule{
+					{
+						Ports: []api.PortProtocol{
+							{Protocol: api.ProtoGRE},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	expectedIn := NewL4PolicyMapWithValues(map[string]*L4Filter{
+		"0/gre": {
+			Port:     0,
+			Protocol: api.ProtoGRE,
+			U8Proto:  u8proto.ProtoIDs["gre"],
+			Ingress:  true,
+			wildcard: td.wildcardCachedSelector,
+			PerSelectorPolicies: L7DataMap{
+				td.wildcardCachedSelector: nil,
+			},
+			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
+				td.wildcardCachedSelector: {nil},
+			}),
+		},
+		"0/ipip": {
+			Port:     0,
+			Protocol: api.ProtoIPIP,
+			U8Proto:  u8proto.ProtoIDs["ipip"],
+			Ingress:  true,
+			wildcard: td.wildcardCachedSelector,
+			PerSelectorPolicies: L7DataMap{
+				td.wildcardCachedSelector: nil,
+			},
+			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
+				td.wildcardCachedSelector: {nil},
+			}),
+		},
+		"0/ipv6": {
+			Port:     0,
+			Protocol: api.ProtoIPv6,
+			U8Proto:  u8proto.ProtoIDs["ipv6"],
+			Ingress:  true,
+			wildcard: td.wildcardCachedSelector,
+			PerSelectorPolicies: L7DataMap{
+				td.wildcardCachedSelector: nil,
+			},
+			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
+				td.wildcardCachedSelector: {nil},
+			}),
+		},
+		"0/esp": {
+			Port:     0,
+			Protocol: api.ProtoESP,
+			U8Proto:  u8proto.ProtoIDs["esp"],
+			Ingress:  true,
+			wildcard: td.wildcardCachedSelector,
+			PerSelectorPolicies: L7DataMap{
+				td.wildcardCachedSelector: nil,
+			},
+			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
+				td.wildcardCachedSelector: {nil},
+			}),
+		},
+		"0/ah": {
+			Port:     0,
+			Protocol: api.ProtoAH,
+			U8Proto:  u8proto.ProtoIDs["ah"],
+			Ingress:  true,
+			wildcard: td.wildcardCachedSelector,
+			PerSelectorPolicies: L7DataMap{
+				td.wildcardCachedSelector: nil,
+			},
+			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
+				td.wildcardCachedSelector: {nil},
+			}),
+		},
+	})
+
+	expectedOut := NewL4PolicyMapWithValues(map[string]*L4Filter{"0/gre": {
+		Port:     0,
+		Protocol: api.ProtoGRE,
+		U8Proto:  u8proto.ProtoIDs["gre"],
 		Ingress:  false,
 		wildcard: td.wildcardCachedSelector,
 		PerSelectorPolicies: L7DataMap{
@@ -834,7 +1023,7 @@ func TestEgressRuleRestrictions(t *testing.T) {
 		},
 	}
 
-	err := apiRule1.Sanitize()
+	err := apiRule1.Validate()
 	require.Error(t, err)
 }
 
@@ -849,15 +1038,15 @@ func TestPolicyEntityValidationEgress(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, r.Sanitize())
+	require.NoError(t, r.ValidateAndSanitize())
 	require.Len(t, r.Egress[0].ToEntities, 1)
 
 	r.Egress[0].ToEntities = []api.Entity{api.EntityHost}
-	require.NoError(t, r.Sanitize())
+	require.NoError(t, r.ValidateAndSanitize())
 	require.Len(t, r.Egress[0].ToEntities, 1)
 
 	r.Egress[0].ToEntities = []api.Entity{"trololo"}
-	require.Error(t, r.Sanitize())
+	require.Error(t, r.ValidateAndSanitize())
 }
 
 func TestPolicyEntityValidationIngress(t *testing.T) {
@@ -871,15 +1060,15 @@ func TestPolicyEntityValidationIngress(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, r.Sanitize())
+	require.NoError(t, r.ValidateAndSanitize())
 	require.Len(t, r.Ingress[0].FromEntities, 1)
 
 	r.Ingress[0].FromEntities = []api.Entity{api.EntityHost}
-	require.NoError(t, r.Sanitize())
+	require.NoError(t, r.ValidateAndSanitize())
 	require.Len(t, r.Ingress[0].FromEntities, 1)
 
 	r.Ingress[0].FromEntities = []api.Entity{"trololo"}
-	require.Error(t, r.Sanitize())
+	require.Error(t, r.ValidateAndSanitize())
 }
 
 func TestPolicyEntityValidationEntitySelectorsFill(t *testing.T) {
@@ -900,7 +1089,7 @@ func TestPolicyEntityValidationEntitySelectorsFill(t *testing.T) {
 			},
 		},
 	}
-	require.NoError(t, r.Sanitize())
+	require.NoError(t, r.ValidateAndSanitize())
 	require.Len(t, r.Ingress[0].FromEntities, 2)
 	require.Len(t, r.Egress[0].ToEntities, 2)
 }
@@ -936,14 +1125,14 @@ func TestL3RuleLabels(t *testing.T) {
 			Verdict:     types.Allow,
 			Subject:     labelSelectorA,
 			Labels:      ruleLabels["rule1"],
-			L3:          types.ToSelectors(api.CIDRSlice{"10.0.1.0/32"}...),
+			L3:          types.ToSelectors(api.CIDR("10.0.1.0/32")),
 		}, {
 			Ingress:     false,
 			DefaultDeny: true,
 			Verdict:     types.Allow,
 			Subject:     labelSelectorA,
 			Labels:      ruleLabels["rule1"],
-			L3:          types.ToSelectors(api.CIDRSlice{"10.1.0.0/32"}...),
+			L3:          types.ToSelectors(api.CIDR("10.1.0.0/32")),
 		}},
 		"rule2": {{
 			Ingress:     true,
@@ -951,14 +1140,14 @@ func TestL3RuleLabels(t *testing.T) {
 			Verdict:     types.Allow,
 			Subject:     labelSelectorA,
 			Labels:      ruleLabels["rule2"],
-			L3:          types.ToSelectors(api.CIDRSlice{"10.0.2.0/32"}...),
+			L3:          types.ToSelectors(api.CIDR("10.0.2.0/32")),
 		}, {
 			Ingress:     false,
 			DefaultDeny: true,
 			Verdict:     types.Allow,
 			Subject:     labelSelectorA,
 			Labels:      ruleLabels["rule2"],
-			L3:          types.ToSelectors(api.CIDRSlice{"10.2.0.0/32"}...),
+			L3:          types.ToSelectors(api.CIDR("10.2.0.0/32")),
 		}},
 	}
 
@@ -1006,8 +1195,8 @@ func TestL3RuleLabels(t *testing.T) {
 
 			type expectedResult map[string]labels.LabelArrayList
 			mapDirectionalResultsToExpectedOutput := map[*L4Filter]expectedResult{
-				finalPolicy.L4Policy.Ingress.PortRules[0].ExactLookup("0", 0, "ANY"): test.expectedIngressLabels,
-				finalPolicy.L4Policy.Egress.PortRules[0].ExactLookup("0", 0, "ANY"):  test.expectedEgressLabels,
+				finalPolicy.L4Policy.Ingress.PortRules[0].ExactLookupPortNum(0, 0, u8proto.ANY): test.expectedIngressLabels,
+				finalPolicy.L4Policy.Egress.PortRules[0].ExactLookupPortNum(0, 0, u8proto.ANY):  test.expectedEgressLabels,
 			}
 			for filter, exp := range mapDirectionalResultsToExpectedOutput {
 				if len(exp) > 0 {
@@ -1024,7 +1213,7 @@ func TestL3RuleLabels(t *testing.T) {
 
 						matches = false
 						for sel := range filter.PerSelectorPolicies {
-							cidrLabels := labels.ParseLabelArray("cidr:" + cidr)
+							cidrLabels := labels.ParseLabelArray("cidr:"+cidr, "reserved:world")
 							t.Logf("Testing %+v", cidrLabels)
 							cidr, ok := sel.(*identitySelector).source.(*types.CIDRSelector)
 							if ok {
@@ -1155,8 +1344,12 @@ func TestL4RuleLabels(t *testing.T) {
 			}
 			require.Equal(t, len(test.expectedIngressLabels), ingressLen, test.description)
 			for portProto := range test.expectedIngressLabels {
-				portProtoSlice := strings.Split(portProto, "/")
-				out := finalPolicy.L4Policy.Ingress.PortRules[0].ExactLookup(portProtoSlice[0], 0, portProtoSlice[1])
+				var port uint16
+				var proto string
+				fmt.Sscanf(portProto, "%d/%s", &port, &proto)
+				u8p, err := u8proto.ParseProtocol(proto)
+				require.NoError(t, err)
+				out := finalPolicy.L4Policy.Ingress.PortRules[0].ExactLookupPortNum(port, 0, u8p)
 				require.NotNil(t, out, test.description)
 				require.Len(t, out.RuleOrigin, 1, test.description)
 				lbls := out.RuleOrigin[out.wildcard].GetLabelArrayList()
@@ -1169,8 +1362,12 @@ func TestL4RuleLabels(t *testing.T) {
 			}
 			require.Equal(t, len(test.expectedEgressLabels), egressLen, test.description)
 			for portProto := range test.expectedEgressLabels {
-				portProtoSlice := strings.Split(portProto, "/")
-				out := finalPolicy.L4Policy.Egress.PortRules[0].ExactLookup(portProtoSlice[0], 0, portProtoSlice[1])
+				var port uint16
+				var proto string
+				fmt.Sscanf(portProto, "%d/%s", &port, &proto)
+				u8p, err := u8proto.ParseProtocol(proto)
+				require.NoError(t, err)
+				out := finalPolicy.L4Policy.Egress.PortRules[0].ExactLookupPortNum(port, 0, u8p)
 				require.NotNil(t, out, test.description)
 				require.Len(t, out.RuleOrigin, 1, test.description)
 				lbls := out.RuleOrigin[out.wildcard].GetLabelArrayList()
@@ -1454,9 +1651,9 @@ func TestIngressL4AllowAll(t *testing.T) {
 
 	pol, err := repo.resolvePolicyLocked(idC)
 	require.NoError(t, err)
-	defer pol.detach(true, 0)
+	defer pol.Detach()
 
-	filter := pol.L4Policy.Ingress.PortRules[0].ExactLookup("80", 0, "TCP")
+	filter := pol.L4Policy.Ingress.PortRules[0].ExactLookupPortNum(80, 0, u8proto.TCP)
 	require.NotNil(t, filter)
 	require.Equal(t, uint16(80), filter.Port)
 	require.True(t, filter.Ingress)
@@ -1486,10 +1683,10 @@ func TestIngressL4AllowAllNamedPort(t *testing.T) {
 
 	pol, err := repo.resolvePolicyLocked(idC)
 	require.NoError(t, err)
-	defer pol.detach(true, 0)
+	defer pol.Detach()
 
 	require.Len(t, pol.L4Policy.Ingress.PortRules, 1)
-	filter := pol.L4Policy.Ingress.PortRules[0].ExactLookup("port-80", 0, "TCP")
+	filter := pol.L4Policy.Ingress.PortRules[0].ExactLookupPortName("port-80", u8proto.TCP)
 	require.NotNil(t, filter)
 	require.Equal(t, uint16(0), filter.Port)
 	require.Equal(t, "port-80", filter.PortName)
@@ -1545,11 +1742,11 @@ func TestEgressL4AllowAll(t *testing.T) {
 
 	pol, err := repo.resolvePolicyLocked(idA)
 	require.NoError(t, err)
-	defer pol.detach(true, 0)
+	defer pol.Detach()
 
 	t.Log(pol.L4Policy.Egress.PortRules)
 	require.Len(t, pol.L4Policy.Egress.PortRules, 1)
-	filter := pol.L4Policy.Egress.PortRules[0].ExactLookup("80", 0, "TCP")
+	filter := pol.L4Policy.Egress.PortRules[0].ExactLookupPortNum(80, 0, u8proto.TCP)
 	require.NotNil(t, filter)
 	require.Equal(t, uint16(80), filter.Port)
 	require.False(t, filter.Ingress)
@@ -1583,15 +1780,15 @@ func TestEgressL4AllowWorld(t *testing.T) {
 
 	pol, err := repo.resolvePolicyLocked(idA)
 	require.NoError(t, err)
-	defer pol.detach(true, 0)
+	defer pol.Detach()
 
 	require.Len(t, pol.L4Policy.Egress.PortRules, 1)
-	filter := pol.L4Policy.Egress.PortRules[0].ExactLookup("80", 0, "TCP")
+	filter := pol.L4Policy.Egress.PortRules[0].ExactLookupPortNum(80, 0, u8proto.TCP)
 	require.NotNil(t, filter)
 	require.Equal(t, uint16(80), filter.Port)
 	require.False(t, filter.Ingress)
 
-	require.Len(t, filter.PerSelectorPolicies, 3)
+	require.Len(t, filter.PerSelectorPolicies, 4)
 }
 
 func TestEgressL4AllowAllEntity(t *testing.T) {
@@ -1619,10 +1816,10 @@ func TestEgressL4AllowAllEntity(t *testing.T) {
 
 	pol, err := repo.resolvePolicyLocked(idA)
 	require.NoError(t, err)
-	defer pol.detach(true, 0)
+	defer pol.Detach()
 
 	require.Len(t, pol.L4Policy.Egress.PortRules, 1)
-	filter := pol.L4Policy.Egress.PortRules[0].ExactLookup("80", 0, "TCP")
+	filter := pol.L4Policy.Egress.PortRules[0].ExactLookupPortNum(80, 0, u8proto.TCP)
 	require.NotNil(t, filter)
 	require.Equal(t, uint16(80), filter.Port)
 	require.False(t, filter.Ingress)
@@ -1722,9 +1919,8 @@ func TestL4WildcardMerge(t *testing.T) {
 						{Port: "7000", Protocol: api.ProtoTCP},
 					},
 					Rules: &api.L7Rules{
-						L7Proto: "testparser",
-						L7: []api.PortRuleL7{
-							{"Key": "Value"},
+						HTTP: []api.PortRuleHTTP{
+							{Method: "GET", Path: "/"},
 						},
 					},
 				}},
@@ -1767,11 +1963,13 @@ func TestL4WildcardMerge(t *testing.T) {
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorC: &PerSelectorPolicy{
 					Verdict:          types.Allow,
-					L7Parser:         "testparser",
-					ListenerPriority: ListenerPriorityNone,
+					L7Parser:         ParserTypeHTTP,
+					ListenerPriority: ListenerPriorityHTTP,
 					L7Rules: api.L7Rules{
-						L7Proto: "testparser",
-						L7:      []api.PortRuleL7{{"Key": "Value"}, {}},
+						HTTP: []api.PortRuleHTTP{
+							{},
+							{Path: "/", Method: "GET"},
+						},
 					},
 				},
 			},
@@ -1808,9 +2006,8 @@ func TestL4WildcardMerge(t *testing.T) {
 						{Port: "7000", Protocol: api.ProtoTCP},
 					},
 					Rules: &api.L7Rules{
-						L7Proto: "testparser",
-						L7: []api.PortRuleL7{
-							{"Key": "Value"},
+						HTTP: []api.PortRuleHTTP{
+							{Path: "/", Method: "GET"},
 						},
 					},
 				}},

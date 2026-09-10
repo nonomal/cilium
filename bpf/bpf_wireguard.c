@@ -12,7 +12,8 @@
 #include <netdev_config.h>
 
 /* WORLD_IPV{4,6}_ID varies based on dualstack being enabled. Real values are
- * written into node_config.h at runtime. */
+ * written into node_config.h at runtime.
+ */
 #define SECLABEL WORLD_ID
 #define SECLABEL_IPV4 WORLD_IPV4_ID
 #define SECLABEL_IPV6 WORLD_IPV6_ID
@@ -79,30 +80,30 @@ handle_ipv6(struct __ctx_buff *ctx, __u32 identity __maybe_unused, __s8 *ext_err
 
 	ep = lookup_ip6_endpoint(ip6);
 	if (ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY)) {
-#ifdef ENABLE_HOST_ROUTING
-		int l3_off = ETH_HLEN;
-		bool l2_hdr_required = true;
+		if (CONFIG(enable_bpf_host_routing)) {
+			int l3_off = ETH_HLEN;
+			bool l2_hdr_required = true;
 
-		ret = maybe_add_l2_hdr(ctx, ep->ifindex, &l2_hdr_required);
-		if (ret != 0)
-			return ret;
-		if (l2_hdr_required)
-			l3_off += __ETH_HLEN;
+			ret = maybe_add_l2_hdr(ctx, ep->ifindex, &l2_hdr_required);
+			if (ret != 0)
+				return ret;
+			if (l2_hdr_required)
+				l3_off += __ETH_HLEN;
 
-		return ipv6_local_delivery(ctx, l3_off, identity, MARK_MAGIC_IDENTITY, ep,
-					   METRIC_INGRESS, false, false);
-#else
-		return CTX_ACT_OK;
-#endif /* ENABLE_HOST_ROUTING */
+			return ipv6_local_delivery(ctx, l3_off, identity, MARK_MAGIC_IDENTITY, ep,
+						   METRIC_INGRESS, false, false);
+		} else {
+			return CTX_ACT_OK;
+		}
 	}
 
 	ret = add_l2_hdr(ctx);
 	if (ret != 0)
 		return ret;
 
-#ifdef ENABLE_IDENTITY_MARK
-	set_identity_mark(ctx, identity, MARK_MAGIC_DECRYPT);
-#endif
+	if (CONFIG(enable_identity_mark))
+		set_identity_mark(ctx, identity, MARK_MAGIC_DECRYPT);
+
 	return ipv6_host_delivery(ctx, __ETH_HLEN);
 }
 
@@ -148,7 +149,7 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 identity __maybe_unused, __s8 *ext_err
 		bool punt_to_stack = false;
 		bool is_dsr = false;
 
-		ret = nodeport_lb4(ctx, ip4, ETH_HLEN, identity, &punt_to_stack,
+		ret = nodeport_lb4(ctx, ip4, identity, &punt_to_stack,
 				   ext_err, &is_dsr);
 		/* nodeport_lb4() returns with TC_ACT_REDIRECT for
 		 * traffic to L7 LB. Policy enforcement needs to take
@@ -190,27 +191,27 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 identity __maybe_unused, __s8 *ext_err
 	 */
 	ep = lookup_ip4_endpoint(ip4);
 	if (ep && !(ep->flags & ENDPOINT_MASK_HOST_DELIVERY)) {
-#ifdef ENABLE_HOST_ROUTING
-		int l3_off = ETH_HLEN;
-		bool l2_hdr_required = true;
+		if (CONFIG(enable_bpf_host_routing)) {
+			int l3_off = ETH_HLEN;
+			bool l2_hdr_required = true;
 
-		ret = maybe_add_l2_hdr(ctx, ep->ifindex, &l2_hdr_required);
-		if (ret != 0)
-			return ret;
-		if (l2_hdr_required) {
-			/* l2 header is added */
-			l3_off += __ETH_HLEN;
-			if (!__revalidate_data_pull(ctx, &data, &data_end,
-						    (void **)&ip4, l3_off,
-						    sizeof(*ip4), false))
-				return DROP_INVALID;
+			ret = maybe_add_l2_hdr(ctx, ep->ifindex, &l2_hdr_required);
+			if (ret != 0)
+				return ret;
+			if (l2_hdr_required) {
+				/* l2 header is added */
+				l3_off += __ETH_HLEN;
+				if (!__revalidate_data_pull(ctx, &data, &data_end,
+							    (void **)&ip4, l3_off,
+							    sizeof(*ip4), false))
+					return DROP_INVALID;
+			}
+
+			return ipv4_local_delivery(ctx, l3_off, identity, MARK_MAGIC_IDENTITY,
+						   ip4, ep, METRIC_INGRESS, false, false, 0);
+		} else {
+			return CTX_ACT_OK;
 		}
-
-		return ipv4_local_delivery(ctx, l3_off, identity, MARK_MAGIC_IDENTITY, ip4, ep,
-					   METRIC_INGRESS, false, false, 0);
-#else
-		return CTX_ACT_OK;
-#endif /* ENABLE_HOST_ROUTING */
 	}
 
 	ret = add_l2_hdr(ctx);
@@ -221,14 +222,14 @@ handle_ipv4(struct __ctx_buff *ctx, __u32 identity __maybe_unused, __s8 *ext_err
 				    sizeof(*ip4), false))
 		return DROP_INVALID;
 
-#ifdef ENABLE_IDENTITY_MARK
 	/* We must use the MARK_MAGIC_DECRYPT rather than MARK_MAGIC_IDENTITY though,
 	 * as at the beginning of the from-wireguard program we mark the packet as
 	 * decrypted. That has been introduced to support Ingress Strict Mode
 	 * (see https://github.com/cilium/cilium/pull/39239).
 	 */
-	set_identity_mark(ctx, identity, MARK_MAGIC_DECRYPT);
-#endif
+	if (CONFIG(enable_identity_mark))
+		set_identity_mark(ctx, identity, MARK_MAGIC_DECRYPT);
+
 	return ipv4_host_delivery(ctx, __ETH_HLEN, ip4);
 }
 
@@ -265,10 +266,9 @@ int cil_from_wireguard(struct __ctx_buff *ctx)
 	bpf_clear_meta(ctx);
 	check_and_store_ip_trace_id(ctx);
 
-#ifdef ENABLE_IDENTITY_MARK
 	/* mark packet as decrypted by wireguard */
-	set_decrypt_mark(ctx, 0);
-#endif
+	if (CONFIG(enable_identity_mark))
+		set_decrypt_mark(ctx, 0);
 
 #if defined(TUNNEL_MODE) && !(defined(ENABLE_NODEPORT) && defined(ENABLE_NODE_ENCRYPTION))
 	/* In native routing mode we want to deliver packets to local endpoints

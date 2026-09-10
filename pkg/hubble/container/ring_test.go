@@ -710,7 +710,6 @@ func TestRingFunctionalitySerialized(t *testing.T) {
 func TestRing_ReadFrom_Test_1(t *testing.T) {
 	defer testutils.GoleakVerifyNone(
 		t,
-		// ignore goroutines started by the redirect we do from klog to logrus
 		testutils.GoleakIgnoreTopFunction("k8s.io/klog.(*loggingT).flushDaemon"),
 		testutils.GoleakIgnoreTopFunction("k8s.io/klog/v2.(*loggingT).flushDaemon"),
 		testutils.GoleakIgnoreTopFunction("io.(*pipe).read"))
@@ -741,11 +740,9 @@ func TestRing_ReadFrom_Test_1(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	ch := make(chan *v1.Event, 30)
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
+	wg.Go(func() {
 		r.readFrom(ctx, 0, ch)
-		wg.Done()
-	}()
+	})
 	i := int64(0)
 	for entry := range ch {
 		require.NotNil(t, entry)
@@ -771,7 +768,6 @@ func TestRing_ReadFrom_Test_1(t *testing.T) {
 func TestRing_ReadFrom_Test_2(t *testing.T) {
 	defer testutils.GoleakVerifyNone(
 		t,
-		// ignore goroutines started by the redirect we do from klog to logrus
 		testutils.GoleakIgnoreTopFunction("k8s.io/klog.(*loggingT).flushDaemon"),
 		testutils.GoleakIgnoreTopFunction("k8s.io/klog/v2.(*loggingT).flushDaemon"),
 		testutils.GoleakIgnoreTopFunction("io.(*pipe).read"))
@@ -805,11 +801,9 @@ func TestRing_ReadFrom_Test_2(t *testing.T) {
 	// be able to catch up with the writer.
 	ch := make(chan *v1.Event, 30)
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		r.readFrom(ctx, 1, ch)
-	}()
+	})
 	i := int64(1) // ReadFrom
 	for event := range ch {
 		require.NotNil(t, event)
@@ -870,7 +864,6 @@ func TestRing_ReadFrom_Test_2(t *testing.T) {
 func TestRing_ReadFrom_Test_3(t *testing.T) {
 	defer testutils.GoleakVerifyNone(
 		t,
-		// ignore goroutines started by the redirect we do from klog to logrus
 		testutils.GoleakIgnoreTopFunction("k8s.io/klog.(*loggingT).flushDaemon"),
 		testutils.GoleakIgnoreTopFunction("k8s.io/klog/v2.(*loggingT).flushDaemon"),
 		testutils.GoleakIgnoreTopFunction("io.(*pipe).read"))
@@ -903,11 +896,9 @@ func TestRing_ReadFrom_Test_3(t *testing.T) {
 	// be able to catch up with the writer.
 	ch := make(chan *v1.Event, 30)
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
+	wg.Go(func() {
 		r.readFrom(ctx, ^uint64(0)-15, ch)
-		wg.Done()
-	}()
+	})
 	i := ^uint64(0) - 15
 	for entry := range ch {
 		require.NotNil(t, entry)

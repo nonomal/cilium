@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/testutils"
-	"github.com/cilium/cilium/pkg/types"
 )
 
 func setup(tb testing.TB) {
@@ -27,19 +27,19 @@ func setup(tb testing.TB) {
 
 func TestNewDeviceState(t *testing.T) {
 	t.Run("mac copied and l3 unset for valid length", func(t *testing.T) {
-		mac := net.HardwareAddr{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
-		state := NewDeviceState(mac)
+		ha := net.HardwareAddr{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}
+		state := NewDeviceState(ha)
 
-		require.False(t, state.IsL3())
-		require.Equal(t, types.MACAddr{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, state.MAC)
+		require.Equal(t, DeviceStateL3(0x00), state.L3&deviceStateL3Mask)
+		require.Equal(t, mac.MAC{0x01, 0x02, 0x03, 0x04, 0x05, 0x06}, state.MAC)
 	})
 
 	t.Run("l3 set when mac length invalid", func(t *testing.T) {
-		mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee}
-		state := NewDeviceState(mac)
+		ha := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee}
+		state := NewDeviceState(ha)
 
-		require.True(t, state.IsL3())
-		require.Equal(t, types.MACAddr{}, state.MAC)
+		require.Equal(t, deviceStateL3Mask, state.L3&deviceStateL3Mask)
+		require.Equal(t, mac.MAC{}, state.MAC)
 	})
 }
 
@@ -77,8 +77,7 @@ func TestPrivilegedNetDevMap(t *testing.T) {
 	require.Equal(t, state1, seen[1])
 	require.Equal(t, state2, seen[2])
 
-	require.NoError(t, dm.Clear(2))
-	got2, err = dm.Lookup(2)
-	require.NoError(t, err)
-	require.Equal(t, DeviceState{}, *got2)
+	require.NoError(t, dm.Delete(2))
+	_, err = dm.Lookup(2)
+	require.Error(t, err)
 }

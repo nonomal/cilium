@@ -268,8 +268,11 @@ cluster
     Cluster is the logical group of all network endpoints inside of the local
     cluster. This includes all Cilium-managed endpoints of the local cluster,
     unmanaged endpoints in the local cluster, as well as the host,
-    remote-node, and init identities. This also includes all remote nodes
-    in a clustermesh scenario.
+    remote-node, init, ingress, health, and kube-apiserver entities. This 
+    also includes all remote nodes in a clustermesh scenario.
+cluster-mesh
+    The cluster-mesh entity selects all endpoints in meshed clusters, as well as
+    everything selected by the cluster entity.
 init
     The init entity contains all endpoints in bootstrap phase for which the
     security identity has not been resolved yet. This is typically only
@@ -445,18 +448,32 @@ but not CIDR prefix ``10.96.0.0/12``
 .. literalinclude:: ../../../examples/policies/l3/cidr/cidr.yaml
   :language: yaml
 
+
+Scalability
+~~~~~~~~~~~
+
+Policies that select large numbers of distinct CIDRs can cause agents to allocate
+large numbers of :ref:`security identities <arch_id_security>`. In this scenario,
+use a :ref:`CiliumCIDRGroup` to reduce identity usage.
+
 .. _cidr_select_nodes:
 
-Selecting nodes with CIDR / ipBlock
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Selecting pods or nodes with CIDR / ipBlock
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. include:: ../../beta.rst
+.. include:: /beta.rst
 
 By default, CIDR-based selectors do not match in-cluster entities (pods or nodes).
-Optionally, you can direct the policy engine to select nodes by CIDR / ipBlock.
-This requires you to configure Cilium with ``--policy-cidr-match-mode=nodes`` or
-the equivalent Helm value ``policyCIDRMatchMode: nodes``. It is safe to toggle this
-option on a running cluster, and toggling the option affects neither upgrades nor downgrades.
+Optionally, you can direct the policy engine to select pods or nodes by CIDR / ipBlock.
+This requires you to configure Cilium with ``--policy-cidr-match-mode=pods`` or ``--policy-cidr-match-mode=nodes`` (or the equivalent Helm values ``policyCIDRMatchMode: pods`` or ``policyCIDRMatchMode: nodes``).
+
+.. caution::
+
+   Leaving ``--policy-cidr-match-mode`` disabled (the default) is recommended for most deployments.
+
+   Enabling ``--policy-cidr-match-mode=pods`` allocates additional :ref:`security identities <arch_id_security>` for every pod matching a CIDR selector. In environments with large numbers of pods, high pod churn, or extensive CIDR rule sets, this significantly increases identity consumption and risks exhausting available Cilium security identities.
+
+   Only enable or modify this setting if you specifically require CIDR rules to match intra-cluster pod IPs, understand your cluster's security identity allocation limits, and are prepared to monitor identity usage and revert the setting if needed.
 
 When ``--policy-cidr-match-mode=nodes`` is specified, every agent allocates a
 distinct local :ref:`security identity <arch_id_security>` for all other nodes.

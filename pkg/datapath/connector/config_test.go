@@ -13,16 +13,16 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
 
-	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	"github.com/cilium/cilium/pkg/datapath/linux/probes"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
-	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
+	"github.com/cilium/cilium/pkg/kpr"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
 	"github.com/cilium/cilium/pkg/testutils/netns"
+	fakewireguard "github.com/cilium/cilium/pkg/wireguard/fake"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
 
@@ -75,6 +75,25 @@ var (
 		EnableIPv6:      true,
 		EnableBPFTProxy: true,
 	}
+	daemonConfigNetkitHostLegacyRouting = option.DaemonConfig{
+		DatapathMode:             datapathOption.DatapathModeNetkit,
+		EnableIPv4:               true,
+		EnableIPv6:               true,
+		UnsafeDaemonConfigOption: option.UnsafeDaemonConfig{EnableHostLegacyRouting: true},
+	}
+	daemonConfigNetkitIptablesMasq = option.DaemonConfig{
+		DatapathMode:         datapathOption.DatapathModeNetkit,
+		EnableIPv4:           true,
+		EnableIPv6:           true,
+		EnableIPv4Masquerade: true,
+		EnableBPFMasquerade:  false,
+	}
+	daemonConfigNetkitEndpointRoutes = option.DaemonConfig{
+		DatapathMode:         datapathOption.DatapathModeNetkit,
+		EnableIPv4:           true,
+		EnableIPv6:           true,
+		EnableEndpointRoutes: true,
+	}
 	daemonConfigNetkitL2 = option.DaemonConfig{
 		DatapathMode:    datapathOption.DatapathModeNetkitL2,
 		EnableIPv4:      true,
@@ -86,6 +105,25 @@ var (
 		EnableIPv4:      true,
 		EnableIPv6:      true,
 		EnableBPFTProxy: true,
+	}
+	daemonConfigNetkitL2HostLegacyRouting = option.DaemonConfig{
+		DatapathMode:             datapathOption.DatapathModeNetkitL2,
+		EnableIPv4:               true,
+		EnableIPv6:               true,
+		UnsafeDaemonConfigOption: option.UnsafeDaemonConfig{EnableHostLegacyRouting: true},
+	}
+	daemonConfigNetkitL2IptablesMasq = option.DaemonConfig{
+		DatapathMode:         datapathOption.DatapathModeNetkitL2,
+		EnableIPv4:           true,
+		EnableIPv6:           true,
+		EnableIPv4Masquerade: true,
+		EnableBPFMasquerade:  false,
+	}
+	daemonConfigNetkitL2EndpointRoutes = option.DaemonConfig{
+		DatapathMode:         datapathOption.DatapathModeNetkitL2,
+		EnableIPv4:           true,
+		EnableIPv6:           true,
+		EnableEndpointRoutes: true,
 	}
 	daemonConfigAuto = option.DaemonConfig{
 		DatapathMode:    datapathOption.DatapathModeAuto,
@@ -99,10 +137,29 @@ var (
 		EnableIPv6:      true,
 		EnableBPFTProxy: true,
 	}
+	daemonConfigAutoHostLegacyRouting = option.DaemonConfig{
+		DatapathMode:             datapathOption.DatapathModeAuto,
+		EnableIPv4:               true,
+		EnableIPv6:               true,
+		UnsafeDaemonConfigOption: option.UnsafeDaemonConfig{EnableHostLegacyRouting: true},
+	}
+	daemonConfigAutoIptablesMasq = option.DaemonConfig{
+		DatapathMode:         datapathOption.DatapathModeAuto,
+		EnableIPv4:           true,
+		EnableIPv6:           true,
+		EnableIPv4Masquerade: true,
+		EnableBPFMasquerade:  false,
+	}
+	daemonConfigAutoEndpointRoutes = option.DaemonConfig{
+		DatapathMode:         datapathOption.DatapathModeAuto,
+		EnableIPv4:           true,
+		EnableIPv6:           true,
+		EnableEndpointRoutes: true,
+	}
 
 	// WireguardConfigs
-	wgConfigEnabled  = fakeTypes.WireguardConfig{EnableWireguard: true}
-	wgConfigDisabled = fakeTypes.WireguardConfig{EnableWireguard: false}
+	wgConfigEnabled  = fakewireguard.Config{EnableWireguard: true}
+	wgConfigDisabled = fakewireguard.Config{EnableWireguard: false}
 
 	// TunnelConfigs
 	tunnelConfigNative = tunnel.NewTestConfig(tunnel.Disabled)
@@ -110,30 +167,35 @@ var (
 	tunnelConfigGeneve = tunnel.NewTestConfig(tunnel.Geneve)
 
 	// ConnectorConfigs
-	connectorConfigVeth = ConnectorConfig{
-		configuredMode:  types.ConnectorModeVeth,
-		operationalMode: types.ConnectorModeVeth,
+	connectorConfigVeth = config{
+		configuredMode:  ModeVeth,
+		operationalMode: ModeVeth,
 	}
-	connectorConfigNetkit = ConnectorConfig{
-		configuredMode:  types.ConnectorModeNetkit,
-		operationalMode: types.ConnectorModeNetkit,
+	connectorConfigNetkit = config{
+		configuredMode:  ModeNetkit,
+		operationalMode: ModeNetkit,
 	}
-	connectorConfigNetkitL2 = ConnectorConfig{
-		configuredMode:  types.ConnectorModeNetkitL2,
-		operationalMode: types.ConnectorModeNetkitL2,
+	connectorConfigNetkitL2 = config{
+		configuredMode:  ModeNetkitL2,
+		operationalMode: ModeNetkitL2,
 	}
-	connectorConfigAuto_Veth = ConnectorConfig{
-		configuredMode:  types.ConnectorModeAuto,
-		operationalMode: types.ConnectorModeVeth,
+	connectorConfigAuto_Veth = config{
+		configuredMode:  ModeAuto,
+		operationalMode: ModeVeth,
 	}
-	connectorConfigAuto_Netkit = ConnectorConfig{
-		configuredMode:  types.ConnectorModeAuto,
-		operationalMode: types.ConnectorModeNetkit,
+	connectorConfigAuto_Netkit = config{
+		configuredMode:  ModeAuto,
+		operationalMode: ModeNetkit,
 	}
 )
 
 func hostSupportsNetkit() bool {
 	err := probes.HaveNetkit()
+	return err == nil
+}
+
+func hostSupportsNetkitScrub() bool {
+	err := probes.HaveNetkitScrub()
 	return err == nil
 }
 
@@ -148,16 +210,21 @@ func TestNewConfig(t *testing.T) {
 	tests := []struct {
 		name           string
 		daemonConfig   *option.DaemonConfig
-		wgAgent        *fakeTypes.WireguardAgent
+		wgAgent        *fakewireguard.Agent
 		tunnelConfig   tunnel.Config
-		expectedConfig *ConnectorConfig
-		shouldError    bool
-		shouldSkip     bool
+		expectedConfig *config
+		// kprConfig defaults to KubeProxyReplacement=true for every case
+		// except the explicit kpr-disabled tests below. Use a pointer so
+		// the zero value (struct{KubeProxyReplacement:false}) is
+		// distinguishable from "not set".
+		kprConfig   *kpr.KPRConfig
+		shouldError bool
+		shouldSkip  bool
 	}{
 		{
 			name:           "datapath-carrier-pigeon",
 			daemonConfig:   &daemonConfigCarrierPigeon,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigVeth,
 			shouldError:    true,
@@ -166,7 +233,7 @@ func TestNewConfig(t *testing.T) {
 		{
 			name:           "datapath-veth",
 			daemonConfig:   &daemonConfigVeth,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigVeth,
 			shouldError:    false,
@@ -175,7 +242,7 @@ func TestNewConfig(t *testing.T) {
 		{
 			name:           "datapath-veth+tproxy",
 			daemonConfig:   &daemonConfigVethTproxy,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigVeth,
 			shouldError:    false,
@@ -184,7 +251,7 @@ func TestNewConfig(t *testing.T) {
 		{
 			name:           "datapath-netkit",
 			daemonConfig:   &daemonConfigNetkit,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigNetkit,
 			shouldError:    !hostSupportsNetkit(),
@@ -193,16 +260,57 @@ func TestNewConfig(t *testing.T) {
 		{
 			name:           "datapath-netkit+tproxy",
 			daemonConfig:   &daemonConfigNetkitTproxy,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigNetkit,
 			shouldError:    true,
 			shouldSkip:     false,
 		},
 		{
+			name:           "datapath-netkit+legacy-host-routing",
+			daemonConfig:   &daemonConfigNetkitHostLegacyRouting,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigNetkit,
+			shouldError:    true,
+			shouldSkip:     false,
+		},
+		{
+			// Explicit netkit + iptables masquerade (no BPF masq):
+			// canUseNetkit refuses, agent fails to start. Operator must
+			// switch to BPF masquerade.
+			name:           "datapath-netkit+iptables-masq",
+			daemonConfig:   &daemonConfigNetkitIptablesMasq,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigNetkit,
+			shouldError:    true,
+			shouldSkip:     false,
+		},
+		{
+			// Explicit netkit + KPR disabled: canUseNetkit refuses.
+			name:           "datapath-netkit+kpr-disabled",
+			daemonConfig:   &daemonConfigNetkit,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigNetkit,
+			kprConfig:      &kpr.KPRConfig{KubeProxyReplacement: false},
+			shouldError:    true,
+			shouldSkip:     false,
+		},
+		{
+			name:           "datapath-netkit+endpoint-routes",
+			daemonConfig:   &daemonConfigNetkitEndpointRoutes,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigNetkit,
+			shouldError:    !hostSupportsNetkitScrub(),
+			shouldSkip:     false,
+		},
+		{
 			name:           "datapath-netkit-l2",
 			daemonConfig:   &daemonConfigNetkitL2,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigNetkitL2,
 			shouldError:    !hostSupportsNetkit(),
@@ -211,17 +319,53 @@ func TestNewConfig(t *testing.T) {
 		{
 			name:           "datapath-netkit-l2+tproxy",
 			daemonConfig:   &daemonConfigNetkitL2Tproxy,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigNetkitL2,
 			shouldError:    true,
 			shouldSkip:     false,
 		},
-
+		{
+			name:           "datapath-netkit-l2+legacy-host-routing",
+			daemonConfig:   &daemonConfigNetkitL2HostLegacyRouting,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigNetkitL2,
+			shouldError:    true,
+			shouldSkip:     false,
+		},
+		{
+			name:           "datapath-netkit-l2+iptables-masq",
+			daemonConfig:   &daemonConfigNetkitL2IptablesMasq,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigNetkitL2,
+			shouldError:    true,
+			shouldSkip:     false,
+		},
+		{
+			name:           "datapath-netkit-l2+kpr-disabled",
+			daemonConfig:   &daemonConfigNetkitL2,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigNetkitL2,
+			kprConfig:      &kpr.KPRConfig{KubeProxyReplacement: false},
+			shouldError:    true,
+			shouldSkip:     false,
+		},
+		{
+			name:           "datapath-netkit-l2+endpoint-routes",
+			daemonConfig:   &daemonConfigNetkitL2EndpointRoutes,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigNetkitL2,
+			shouldError:    !hostSupportsNetkitScrub(),
+			shouldSkip:     false,
+		},
 		{
 			name:           "datapath-auto(!netkit)+oper-veth",
 			daemonConfig:   &daemonConfigAuto,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigAuto_Veth,
 			shouldError:    false,
@@ -230,16 +374,48 @@ func TestNewConfig(t *testing.T) {
 		{
 			name:           "datapath-auto(!netkit)+tproxy+oper-veth",
 			daemonConfig:   &daemonConfigAutoTproxy,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigAuto_Veth,
 			shouldError:    false,
 			shouldSkip:     hostSupportsNetkit(),
 		},
 		{
+			name:           "datapath-auto(!netkit)+legacy-host-routing+oper-veth",
+			daemonConfig:   &daemonConfigAutoHostLegacyRouting,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigAuto_Veth,
+			shouldError:    false,
+			shouldSkip:     hostSupportsNetkit(),
+		},
+		{
+			// Old kernel without netkit support: auto must already pick
+			// veth regardless of iptables masquerade. No regression risk
+			// here, but the symmetric case below (with netkit support)
+			// is the one this fix is really protecting.
+			name:           "datapath-auto(!netkit)+iptables-masq+oper-veth",
+			daemonConfig:   &daemonConfigAutoIptablesMasq,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigAuto_Veth,
+			shouldError:    false,
+			shouldSkip:     hostSupportsNetkit(),
+		},
+		{
+			name:           "datapath-auto(!netkit)+kpr-disabled+oper-veth",
+			daemonConfig:   &daemonConfigAuto,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigAuto_Veth,
+			kprConfig:      &kpr.KPRConfig{KubeProxyReplacement: false},
+			shouldError:    false,
+			shouldSkip:     hostSupportsNetkit(),
+		},
+		{
 			name:           "datapath-auto(netkit)+oper-netkit",
 			daemonConfig:   &daemonConfigAuto,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigAuto_Netkit,
 			shouldError:    false,
@@ -248,11 +424,64 @@ func TestNewConfig(t *testing.T) {
 		{
 			name:           "datapath-auto(netkit)+tproxy+oper-veth",
 			daemonConfig:   &daemonConfigAutoTproxy,
-			wgAgent:        fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:   tunnelConfigNative,
 			expectedConfig: &connectorConfigAuto_Veth,
 			shouldError:    false,
 			shouldSkip:     !hostSupportsNetkit(),
+		},
+		{
+			name:           "datapath-auto(netkit)+host-legacy-routing+oper-veth",
+			daemonConfig:   &daemonConfigAutoHostLegacyRouting,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigAuto_Veth,
+			shouldError:    false,
+			shouldSkip:     !hostSupportsNetkit(),
+		},
+		{
+			// This is the regression-protection case: on a kernel that
+			// newly supports netkit, auto must still pick veth when the
+			// rest of the config would force the kpr-initializer to fall
+			// back to legacy routing (iptables masq without bpf masq).
+			// Otherwise a working auto+veth cluster on an older kernel
+			// would break after a kernel upgrade.
+			name:           "datapath-auto(netkit)+iptables-masq+oper-veth",
+			daemonConfig:   &daemonConfigAutoIptablesMasq,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigAuto_Veth,
+			shouldError:    false,
+			shouldSkip:     !hostSupportsNetkit(),
+		},
+		{
+			// Same regression case for kube-proxy-replacement disabled.
+			name:           "datapath-auto(netkit)+kpr-disabled+oper-veth",
+			daemonConfig:   &daemonConfigAuto,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigAuto_Veth,
+			kprConfig:      &kpr.KPRConfig{KubeProxyReplacement: false},
+			shouldError:    false,
+			shouldSkip:     !hostSupportsNetkit(),
+		},
+		{
+			name:           "datapath-auto(netkit,scrub)+endpoint-routes+oper-netkit",
+			daemonConfig:   &daemonConfigAutoEndpointRoutes,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigAuto_Netkit,
+			shouldError:    false,
+			shouldSkip:     !hostSupportsNetkitScrub(),
+		},
+		{
+			name:           "datapath-auto(netkit,!scrub)+endpoint-routes+oper-veth",
+			daemonConfig:   &daemonConfigAutoEndpointRoutes,
+			wgAgent:        fakewireguard.NewTestAgent(wgConfigDisabled),
+			tunnelConfig:   tunnelConfigNative,
+			expectedConfig: &connectorConfigAuto_Veth,
+			shouldError:    false,
+			shouldSkip:     hostSupportsNetkitScrub(),
 		},
 	}
 
@@ -262,12 +491,17 @@ func TestNewConfig(t *testing.T) {
 				t.Skip()
 			}
 
+			kprCfg := kpr.KPRConfig{KubeProxyReplacement: true}
+			if tt.kprConfig != nil {
+				kprCfg = *tt.kprConfig
+			}
 			p := connectorParams{
 				Lifecycle:    &cell.DefaultLifecycle{},
 				Log:          logger,
 				DaemonConfig: tt.daemonConfig,
 				WgAgent:      tt.wgAgent,
 				TunnelConfig: tt.tunnelConfig,
+				KPRConfig:    kprCfg,
 			}
 			connector, err := newConfig(p)
 
@@ -325,6 +559,7 @@ func TestUseTunedBufferMargins(t *testing.T) {
 				Log:          logger,
 				Lifecycle:    &cell.DefaultLifecycle{},
 				DaemonConfig: tt.daemonConfig,
+				KPRConfig:    kpr.KPRConfig{KubeProxyReplacement: true},
 			}
 			connector, err := newConfig(p)
 
@@ -387,7 +622,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 	tests := []struct {
 		name             string
 		daemonConfig     *option.DaemonConfig
-		wgAgent          *fakeTypes.WireguardAgent
+		wgAgent          *fakewireguard.Agent
 		tunnelConfig     tunnel.Config
 		shouldSkip       bool
 		expectedHeadroom uint16
@@ -397,7 +632,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "veth+native-routing",
 			daemonConfig:     &daemonConfigVeth,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:     tunnelConfigNative,
 			shouldSkip:       false,
 			expectedHeadroom: 0,
@@ -406,7 +641,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "veth+native-routing+wireguard",
 			daemonConfig:     &daemonConfigVeth,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigEnabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigEnabled),
 			tunnelConfig:     tunnelConfigNative,
 			shouldSkip:       false,
 			expectedHeadroom: 0,
@@ -415,7 +650,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "veth+geneve-routing",
 			daemonConfig:     &daemonConfigVeth,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:     tunnelConfigGeneve,
 			shouldSkip:       false,
 			expectedHeadroom: 0,
@@ -424,7 +659,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "veth+geneve-routing+wireguard",
 			daemonConfig:     &daemonConfigVeth,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigEnabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigEnabled),
 			tunnelConfig:     tunnelConfigGeneve,
 			shouldSkip:       false,
 			expectedHeadroom: 0,
@@ -433,7 +668,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "veth+vxlan-routing",
 			daemonConfig:     &daemonConfigVeth,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:     tunnelConfigVxlan,
 			shouldSkip:       false,
 			expectedHeadroom: 0,
@@ -442,7 +677,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "veth+vxlan-routing+wireguard",
 			daemonConfig:     &daemonConfigVeth,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigEnabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigEnabled),
 			tunnelConfig:     tunnelConfigVxlan,
 			shouldSkip:       false,
 			expectedHeadroom: 0,
@@ -453,7 +688,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit+native-routing",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:     tunnelConfigNative,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: 0,
@@ -462,7 +697,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit+native-routing+wireguard",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigEnabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigEnabled),
 			tunnelConfig:     tunnelConfigNative,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: wgMargins.Headroom,
@@ -471,7 +706,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit+geneve-routing",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:     tunnelConfigGeneve,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: geneveMargins.Headroom,
@@ -480,7 +715,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit+geneve-routing+wireguard",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigEnabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigEnabled),
 			tunnelConfig:     tunnelConfigGeneve,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: geneveMargins.Headroom + wgMargins.Headroom,
@@ -489,7 +724,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit+vxlan-routing",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:     tunnelConfigVxlan,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: vxlanMargins.Headroom,
@@ -498,7 +733,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit+vxlan-routing+wireguard",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigEnabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigEnabled),
 			tunnelConfig:     tunnelConfigVxlan,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: vxlanMargins.Headroom + wgMargins.Headroom,
@@ -509,7 +744,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit-l2+native-routing",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:     tunnelConfigNative,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: 0,
@@ -518,7 +753,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit-l2+native-routing+wireguard",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigEnabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigEnabled),
 			tunnelConfig:     tunnelConfigNative,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: wgMargins.Headroom,
@@ -527,7 +762,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit-l2+geneve-routing",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:     tunnelConfigGeneve,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: geneveMargins.Headroom,
@@ -536,7 +771,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit-l2+geneve-routing+wireguard",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigEnabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigEnabled),
 			tunnelConfig:     tunnelConfigGeneve,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: geneveMargins.Headroom + wgMargins.Headroom,
@@ -545,7 +780,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit-l2+vxlan-routing",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigDisabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigDisabled),
 			tunnelConfig:     tunnelConfigVxlan,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: vxlanMargins.Headroom,
@@ -554,7 +789,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 		{
 			name:             "netkit-l2+vxlan-routing+wireguard",
 			daemonConfig:     &daemonConfigNetkit,
-			wgAgent:          fakeTypes.NewTestAgent(wgConfigEnabled),
+			wgAgent:          fakewireguard.NewTestAgent(wgConfigEnabled),
 			tunnelConfig:     tunnelConfigVxlan,
 			shouldSkip:       !hostSupportsNetkit(),
 			expectedHeadroom: vxlanMargins.Headroom + wgMargins.Headroom,
@@ -588,6 +823,7 @@ func TestPrivilegedCalculateTunedBufferMargins(t *testing.T) {
 				DaemonConfig: tt.daemonConfig,
 				WgAgent:      tt.wgAgent,
 				TunnelConfig: tt.tunnelConfig,
+				KPRConfig:    kpr.KPRConfig{KubeProxyReplacement: true},
 			}
 
 			connector, err := newConfig(p)

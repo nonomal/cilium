@@ -31,6 +31,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/neighbor"
 	"github.com/cilium/cilium/pkg/datapath/node"
 	"github.com/cilium/cilium/pkg/datapath/orchestrator"
+	"github.com/cilium/cilium/pkg/datapath/plugins"
 	"github.com/cilium/cilium/pkg/datapath/prefilter"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
@@ -81,8 +82,8 @@ var Cell = cell.Module(
 	// Provides the Table[NodeAddress] and the controller that populates it from Table[*Device]
 	tables.NodeAddressCell,
 
-	// Provides the legacy accessor for the above, the NodeAddressing interface.
-	NodeAddressingCell,
+	// Provides the legacy accessor for the above, the node.Addressing interface.
+	node.AddressingCell,
 
 	// Provides the DirectRoutingDevice selection logic.
 	tables.DirectRoutingDeviceCell,
@@ -141,8 +142,9 @@ var Cell = cell.Module(
 
 	vtep.Cell,
 
-	// Provides node handler, which handles node events.
-	cell.Provide(linuxdatapath.NewNodeHandler),
+	// Provides the Linux node reconciler, its policy hooks, and node ID API.
+	cell.Provide(linuxdatapath.NewNodePolicy, linuxdatapath.NewNodeHandler),
+	cell.Invoke(linuxdatapath.RegisterNodeReconciler),
 	cell.Provide(node.NewNodeIDApiHandler),
 
 	// Provides Active Connection Tracking metrics based on counts of
@@ -164,6 +166,9 @@ var Cell = cell.Module(
 
 	// Provides the desired device table, and a reconciler that install these links into the Linux kernel.
 	deviceReconciler.Cell,
+
+	// Plugins cell keeps the plugin registry up to date.
+	plugins.Cell,
 )
 
 func initDatapath(rootLogger *slog.Logger, lifecycle cell.Lifecycle) {

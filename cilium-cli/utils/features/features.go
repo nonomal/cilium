@@ -22,7 +22,6 @@ const (
 	L7Proxy            Feature = "l7-proxy"
 	HostFirewall       Feature = "host-firewall"
 	ICMPPolicy         Feature = "icmp-policy"
-	PortRanges         Feature = "port-ranges"
 	L7PortRanges       Feature = "l7-port-ranges"
 	Tunnel             Feature = "tunnel"
 	TunnelPort         Feature = "tunnel-port"
@@ -90,6 +89,7 @@ const (
 	CNP  Feature = "cilium-network-policy"
 	CCNP Feature = "cilium-clusterwide-network-policy"
 	KNP  Feature = "k8s-network-policy"
+	KCNP Feature = "k8s-cluster-network-policy"
 
 	// Whether or not CIDR selectors can match node IPs
 	CIDRMatchNodes Feature = "cidr-match-nodes"
@@ -127,6 +127,8 @@ const (
 	Ztunnel Feature = "enable-ztunnel"
 
 	DefaultGlobalNamespace Feature = "clustermesh-default-global-namespace"
+
+	SubnetTopology Feature = "subnet-topology"
 )
 
 // Feature is the name of a Cilium Feature (e.g. l7-proxy, cni chaining mode etc)
@@ -156,6 +158,13 @@ func (s Status) String() string {
 	return fmt.Sprintf("%s:%s", str, s.Mode)
 }
 
+func (s Status) shortString() string {
+	if s.Enabled {
+		return "enabled"
+	}
+	return "disabled"
+}
+
 // Set contains the Status of a collection of Features.
 type Set map[Feature]Status
 
@@ -165,7 +174,7 @@ func (fs Set) MatchRequirements(reqs ...Requirement) (bool, string) {
 	for _, req := range reqs {
 		status := fs[req.Feature]
 		if req.requiresEnabled && (req.enabled != status.Enabled) {
-			return false, fmt.Sprintf("Feature %s is disabled", req.Feature)
+			return false, fmt.Sprintf("Feature %s is %s", req.Feature, status.shortString())
 		}
 		if req.requiresMode && (req.mode != status.Mode) {
 			return false, fmt.Sprintf("requires Feature %s mode %s, got %s", req.Feature, req.mode, status.Mode)
@@ -265,15 +274,7 @@ func RequireModeIsNot(feature Feature, mode string) Requirement {
 
 // ExtractFromCiliumVersion extracts features based on Cilium version.
 func (fs Set) ExtractFromCiliumVersion(ciliumVersion semver.Version) {
-	fs[PortRanges] = ExtractPortRanges(ciliumVersion)
 	fs[L7PortRanges] = ExtractL7PortRanges(ciliumVersion)
-}
-
-func ExtractPortRanges(ciliumVersion semver.Version) Status {
-	enabled := versioncheck.MustCompile(">=1.16.0")(ciliumVersion)
-	return Status{
-		Enabled: enabled,
-	}
 }
 
 func ExtractL7PortRanges(ciliumVersion semver.Version) Status {
@@ -398,7 +399,7 @@ func (fs Set) ExtractFromConfigMap(cm *v1.ConfigMap) {
 	}
 
 	fs[EncryptionStrictModeEgress] = Status{
-		// EncryptionStrictMode is deprecated, but we still support it for backwards compatibility until Cilium 1.17
+		// EncryptionStrictMode is deprecated, but we still support it for backwards compatibility until Cilium 1.19
 		// is EOL.
 		Enabled: cm.Data[string(EncryptionStrictMode)] == "true" || cm.Data[string(EncryptionStrictModeEgress)] == "true",
 	}
@@ -417,6 +418,12 @@ func (fs Set) ExtractFromConfigMap(cm *v1.ConfigMap) {
 
 	fs[L7LoadBalancer] = Status{
 		Enabled: cm.Data[string(L7LoadBalancer)] == "envoy",
+	}
+
+	st, ok := cm.Data[string(SubnetTopology)]
+	fs[SubnetTopology] = Status{
+		Enabled: ok,
+		Mode:    st,
 	}
 
 	fs[Tunnel], fs[TunnelPort] = ExtractTunnelFeatureFromConfigMap(cm)

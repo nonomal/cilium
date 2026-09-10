@@ -226,6 +226,7 @@ Emitter identifies the source that emits a Hubble flow.
 | labels | [string](#string) | repeated | labels in `foo=bar` format. |
 | pod_name | [string](#string) |  |  |
 | workloads | [Workload](#flow-Workload) | repeated |  |
+| pod_uid | [string](#string) |  | pod_uid is the Kubernetes UID of the Pod represented by this endpoint. |
 
 
 
@@ -354,6 +355,8 @@ EventTypeFilter is a filter describing a particular event type.
 | file | [FileInfo](#flow-FileInfo) |  | Cilium datapath filename and line number. Currently only applicable when Verdict = DROPPED. |
 | ip_trace_id | [IPTraceID](#flow-IPTraceID) |  | IPTraceID relates to the trace ID in the IP options of a packet. |
 | drop_reason_desc | [DropReason](#flow-DropReason) |  | only applicable to Verdict = DROPPED. |
+| ext_error | [int32](#int32) |  | ext_error is the extended error code reported by the datapath alongside the primary drop reason (see DropNotify.ExtError in pkg/monitor). It provides additional context for the drop (for example, the BPF FIB lookup result for DROP_NO_FIB). Only applicable to Verdict = DROPPED. |
+| ext_drop_reason_desc | [string](#string) |  | ext_drop_reason_desc is the human-readable extended drop reason combining drop_reason_desc with ext_error (equivalent to the string produced by cilium monitor&#39;s DropReasonExt). Only set for drops reported via DropNotify; not populated for policy verdict denials, which carry their reason in drop_reason_desc. |
 | is_reply | [google.protobuf.BoolValue](#google-protobuf-BoolValue) |  | is_reply indicates that this was a packet (L4) or message (L7) in the reply direction. May be absent (in which case it is unknown whether it is a reply or not). |
 | debug_capture_point | [DebugCapturePoint](#flow-DebugCapturePoint) |  | Only applicable to cilium debug capture events, blank for other types |
 | interface | [NetworkInterface](#flow-NetworkInterface) |  | interface is the network interface on which this flow was observed |
@@ -1181,7 +1184,7 @@ here.
 | DROP_EP_NOT_READY | 203 | A BPF program wants to tail call some endpoint&#39;s policy program in cilium_call_policy, but the program is not available. |
 | DROP_NO_EGRESS_IP | 204 | An Egress Gateway node matched a packet against an Egress Gateway policy that didn&#39;t select a valid Egress IP. |
 | DROP_PUNT_PROXY | 205 | Punt packet to a user space proxy. |
-| DROP_NO_DEVICE | 206 | A BPF program failed to look up information for a network device. |
+| DROP_FRAG_NOT_FOUND_WORLD | 207 | A non-first IP fragment from the world was dropped because its first fragment (carrying the L4 ports) was never seen, so host policy cannot be evaluated. Split from DROP_FRAG_NOT_FOUND to distinguish ambient external fragments from in-cluster fragment-tracking bugs. |
 
 
 

@@ -11,8 +11,11 @@ import (
 	envoy_upstreams_http_v3 "github.com/envoyproxy/go-control-plane/envoy/extensions/upstreams/http/v3"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/cilium/cilium/operator/pkg/model"
+	syncnames "github.com/cilium/cilium/pkg/secretsync/names"
 )
 
 type ClusterMutator func(*envoy_config_cluster_v3.Cluster) *envoy_config_cluster_v3.Cluster
@@ -72,6 +75,25 @@ func withIdleTimeout(seconds int) ClusterMutator {
 	}
 }
 
+func withMaxRequestsPerConnection(maxRequests int) ClusterMutator {
+	return func(cluster *envoy_config_cluster_v3.Cluster) *envoy_config_cluster_v3.Cluster {
+		if cluster == nil || maxRequests <= 0 {
+			return cluster
+		}
+		a := cluster.TypedExtensionProtocolOptions[httpProtocolOptionsType]
+		opts := &envoy_upstreams_http_v3.HttpProtocolOptions{}
+		if err := a.UnmarshalTo(opts); err != nil {
+			return cluster
+		}
+		if opts.CommonHttpProtocolOptions == nil {
+			opts.CommonHttpProtocolOptions = &envoy_config_core_v3.HttpProtocolOptions{}
+		}
+		opts.CommonHttpProtocolOptions.MaxRequestsPerConnection = wrapperspb.UInt32(uint32(maxRequests))
+		cluster.TypedExtensionProtocolOptions[httpProtocolOptionsType] = toAny(opts)
+		return cluster
+	}
+}
+
 func withProtocol(protocolVersion HTTPVersionType) ClusterMutator {
 	return func(cluster *envoy_config_cluster_v3.Cluster) *envoy_config_cluster_v3.Cluster {
 		a := cluster.TypedExtensionProtocolOptions[httpProtocolOptionsType]
@@ -108,7 +130,7 @@ func withProtocol(protocolVersion HTTPVersionType) ClusterMutator {
 	}
 }
 
-func withTLSOrigination(tls *model.BackendTLSOrigination) ClusterMutator {
+func withTLSOrigination(secretsNamespace string, tls *model.BackendTLSOrigination) ClusterMutator {
 	return func(cluster *envoy_config_cluster_v3.Cluster) *envoy_config_cluster_v3.Cluster {
 		// This mutator should not get added to the list if this is the case, but just to be safe.
 		if tls == nil {
@@ -127,6 +149,9 @@ func withTLSOrigination(tls *model.BackendTLSOrigination) ClusterMutator {
 		tlsContext := &envoy_config_tls.UpstreamTlsContext{
 			Sni: tls.SNI,
 			CommonTlsContext: &envoy_config_tls.CommonTlsContext{
+				TlsParams: &envoy_config_tls.TlsParameters{
+					TlsMaximumProtocolVersion: envoy_config_tls.TlsParameters_TLSv1_3,
+				},
 				ValidationContextType: &envoy_config_tls.CommonTlsContext_CombinedValidationContext{
 					CombinedValidationContext: &envoy_config_tls.CommonTlsContext_CombinedCertificateValidationContext{
 						DefaultValidationContext: &envoy_config_tls.CertificateValidationContext{},
@@ -139,11 +164,13 @@ func withTLSOrigination(tls *model.BackendTLSOrigination) ClusterMutator {
 							//
 							// * BackendTLSPolicy references ConfigMap
 							// * SecretSync sees ConfigMap reference
-							// * SecretSync copies ConfigMap into Secret in cilium-secrets namespace, using the below
-							//   naming format
-							// * This translation references that Secret
+							// * SecretSync copies ConfigMap into Secret in the configured secrets namespace
+							// * This translation references that Secret using the shared sync name
 							// * The Cilium Agent reads the Secret directly and suppies it to Envoy via SDS.
-							Name: "cilium-secrets" + "/" + tls.CACertRef.Namespace + "-cfgmap-" + tls.CACertRef.Name,
+							Name: syncnames.SyncedConfigMapSDSSecretName(secretsNamespace, types.NamespacedName{
+								Namespace: tls.CACertRef.Namespace,
+								Name:      tls.CACertRef.Name,
+							}),
 						},
 					},
 				},

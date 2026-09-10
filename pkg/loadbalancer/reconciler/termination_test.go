@@ -138,15 +138,14 @@ func testSocketTermination(t *testing.T, hostOnly bool) {
 
 	// Add a backends and wait for the job to pick it up
 	wtxn := db.WriteTxn(backends)
-	be := &loadbalancer.Backend{Address: beAddr}
-	be.Instances = be.Instances.Set(loadbalancer.BackendInstanceKey{
-		ServiceName:    loadbalancer.NewServiceName("bar", "foo"),
-		SourcePriority: 0,
-	}, loadbalancer.BackendParams{
-		Address:   beAddr,
-		State:     loadbalancer.BackendStateActive,
-		Unhealthy: false,
-	})
+	be := &loadbalancer.Backend{
+		ServiceName: loadbalancer.NewServiceName("bar", "foo"),
+		Address:     beAddr,
+		State:       loadbalancer.BackendStateActive,
+		Unhealthy:   false,
+		Source:      source.Kubernetes,
+	}
+	be.SetSourcePriority(0)
 	backends.Insert(wtxn, be)
 	wtxn.Commit()
 
@@ -160,12 +159,12 @@ func testSocketTermination(t *testing.T, hostOnly bool) {
 	// We should see two deletions: one for host ns (if enabled) and one for the mocked
 	// "foo" one.
 	filter := <-mock.requests
-	require.True(t, beAddr.AddrCluster().AsNetIP().Equal(filter.DestIp), "IP matches")
+	require.Equal(t, beAddr.Addr(), filter.DestIp, "IP matches")
 	require.Equal(t, beAddr.Port(), filter.DestPort, "Port matches")
 
 	if !hostOnly {
 		filter = <-mock.requests
-		require.True(t, beAddr.AddrCluster().AsNetIP().Equal(filter.DestIp), "IP matches")
+		require.Equal(t, beAddr.Addr(), filter.DestIp, "IP matches")
 		require.Equal(t, beAddr.Port(), filter.DestPort, "Port matches")
 		require.ElementsMatch(t, visitedNamespaces, []*netns.NetNS{hostNS, fooNS})
 	} else {
@@ -202,7 +201,7 @@ func initializeNetns(t *testing.T, ns *netns.NetNS, addr string) net.Conn {
 					},
 				})
 			}
-			_, err := netlink.AddrList(l, unix.AF_INET)
+			_, err := safenetlink.AddrList(l, unix.AF_INET)
 			assert.NoError(t, err)
 		}
 		conn, err = net.Dial("udp", addr)
@@ -278,7 +277,6 @@ func TestPrivilegedSocketTermination_Datapath(t *testing.T) {
 		maglev.Cell,
 		lbmaps.Cell,
 		cell.Config(loadbalancer.DefaultUserConfig),
-		cell.Config(loadbalancer.DeprecatedConfig{}),
 		cell.Provide(
 			loadbalancer.NewBackendsTable,
 			statedb.RWTable[*loadbalancer.Backend].ToTable,
@@ -436,23 +434,20 @@ func benchmarkChangeIteration(b *testing.B, proto loadbalancer.L4Type) {
 	wtxn := db.WriteTxn(backends)
 	for i := range numBackends {
 		addr := [4]byte{1, byte(i / (256 * 256)), byte(i / 256), byte(i % 256)}
-		be := loadbalancer.Backend{}
-		be.Address = loadbalancer.NewL3n4Addr(
+		addrL3n4 := loadbalancer.NewL3n4Addr(
 			proto,
 			cmtypes.AddrClusterFrom(netip.AddrFrom4(addr), 0),
 			1,
 			loadbalancer.ScopeExternal,
 		)
-		be.Instances = be.Instances.Set(
-			loadbalancer.BackendInstanceKey{
-				ServiceName:    loadbalancer.NewServiceName("foo", "bar"),
-				SourcePriority: 0,
-			}, loadbalancer.BackendParams{
-				Address:   be.Address,
-				Source:    source.Kubernetes,
-				State:     loadbalancer.BackendStateActive,
-				Unhealthy: false,
-			})
+		be := loadbalancer.Backend{
+			ServiceName: loadbalancer.NewServiceName("foo", "bar"),
+			Address:     addrL3n4,
+			Source:      source.Kubernetes,
+			State:       loadbalancer.BackendStateActive,
+			Unhealthy:   false,
+		}
+		be.SetSourcePriority(0)
 		backends.Insert(wtxn, &be)
 	}
 	wtxn.Commit()
@@ -465,9 +460,9 @@ func benchmarkChangeIteration(b *testing.B, proto loadbalancer.L4Type) {
 		wtxn := db.WriteTxn(backends)
 		changeIter, err := backends.Changes(wtxn)
 		require.NoError(b, err)
-		wtxn.Commit()
+		rtxn := wtxn.Commit()
 
-		changes, _ := changeIter.Next(wtxn)
+		changes, _ := changeIter.Next(rtxn)
 		total, dead := 0, 0
 		for change := range changes {
 			backend := change.Object

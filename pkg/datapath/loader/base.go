@@ -14,22 +14,27 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/renameio/v2"
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/alignchecker"
+	"github.com/cilium/cilium/pkg/datapath/config"
+	"github.com/cilium/cilium/pkg/datapath/iptables"
+	"github.com/cilium/cilium/pkg/datapath/linux/bigtcp"
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
+	"github.com/cilium/cilium/pkg/datapath/prefilter"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/registry"
 	"github.com/cilium/cilium/pkg/option"
+	proxy "github.com/cilium/cilium/pkg/proxy/types"
 	"github.com/cilium/cilium/pkg/socketlb"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 )
@@ -57,22 +62,22 @@ func (l *loader) writeNetdevHeader(dir string) error {
 	return nil
 }
 
-func (l *loader) writeNodeConfigHeader(cfg *datapath.LocalNodeConfiguration) error {
+func (l *loader) writeNodeConfigHeader(cfg *config.Config) error {
 	nodeConfigPath := option.Config.GetNodeConfigPath()
-	f, err := os.Create(nodeConfigPath)
+	f, err := renameio.TempFile(filepath.Dir(nodeConfigPath), nodeConfigPath)
 	if err != nil {
 		return fmt.Errorf("failed to create node configuration file at %s: %w", nodeConfigPath, err)
 	}
-	defer f.Close()
+	defer f.Cleanup()
 
 	if err = l.templateCache.WriteNodeConfig(f, cfg); err != nil {
 		return fmt.Errorf("failed to write node configuration file at %s: %w", nodeConfigPath, err)
 	}
-	return nil
+	return f.CloseAtomicallyReplace()
 }
 
 // Must be called with option.Config.EnablePolicyMU locked.
-func writePreFilterHeader(logger *slog.Logger, preFilter datapath.PreFilter, dir string, devices []string) error {
+func writePreFilterHeader(logger *slog.Logger, preFilter prefilter.PreFilter, dir string, devices []string) error {
 	headerPath := filepath.Join(dir, preFilterHeaderFileName)
 	logger.Debug("writing configuration", logfields.Path, headerPath)
 
@@ -91,7 +96,7 @@ func writePreFilterHeader(logger *slog.Logger, preFilter datapath.PreFilter, dir
 	return fw.Flush()
 }
 
-func addENIRules(logger *slog.Logger, sysSettings []tables.Sysctl) ([]tables.Sysctl, error) {
+func addIPv4ENIRules(logger *slog.Logger, sysSettings []tables.Sysctl) ([]tables.Sysctl, error) {
 	// AWS ENI mode requires symmetric routing, see
 	// iptables.addCiliumENIRules().
 	// The default AWS daemonset installs the following rules that are used
@@ -113,7 +118,7 @@ func addENIRules(logger *slog.Logger, sysSettings []tables.Sysctl) ([]tables.Sys
 		return sysSettings, nil
 	}
 
-	iface, err := route.NodeDeviceWithDefaultRoute(logger, option.Config.EnableIPv4, option.Config.EnableIPv6)
+	iface, err := route.NodeDeviceWithDefaultRoute(logger, true, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find interface with default route: %w", err)
 	}
@@ -130,10 +135,33 @@ func addENIRules(logger *slog.Logger, sysSettings []tables.Sysctl) ([]tables.Sys
 		Table:    route.MainTable,
 		Protocol: linux_defaults.RTProto,
 	}); err != nil {
-		return nil, fmt.Errorf("unable to install ip rule for ENI multi-node NodePort: %w", err)
+		return nil, fmt.Errorf("unable to install IPv4 rule for ENI multi-node NodePort: %w", err)
 	}
 
 	return retSettings, nil
+}
+
+func addIPv6ENIRules() error {
+	// AWS ENI mode requires symmetric routing, see addIPv4ENIRules() and
+	// iptables.addCiliumENIRules() for details.
+	//
+	// Note there is no IPv6 counterpart to net.ipv4.conf.<iface>.rp_filter,
+	// so unlike addIPv4ENIRules() there is no sysctl to set here.
+	if !option.Config.EnableIPv6 {
+		return nil
+	}
+
+	if err := route.ReplaceRuleIPv6(route.Rule{
+		Priority: linux_defaults.RulePriorityNodeport,
+		Mark:     linux_defaults.MarkMultinodeNodeport,
+		Mask:     linux_defaults.MaskMultinodeNodeport,
+		Table:    route.MainTable,
+		Protocol: linux_defaults.RTProto,
+	}); err != nil {
+		return fmt.Errorf("unable to install IPv6 rule for ENI multi-node NodePort: %w", err)
+	}
+
+	return nil
 }
 
 func cleanIngressQdisc(logger *slog.Logger, devices []string) error {
@@ -176,15 +204,16 @@ func cleanCallsMaps(mapNamePattern string) error {
 }
 
 func reinitializeOverlay(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry,
-	lnc *datapath.LocalNodeConfiguration, tunnelConfig tunnel.Config) error {
+	collLoader *bpfCollectionLoader, lnc *config.Config, tunnelConfig tunnel.Config) error {
 	// tunnelConfig.EncapProtocol() can be one of tunnel.[Disabled, VXLAN, Geneve]
 	// if it is disabled, the overlay network programs don't have to be (re)initialized
 	if tunnelConfig.EncapProtocol() == tunnel.Disabled {
 		cleanCallsMaps("cilium_calls_overlay*")
 
+		os.RemoveAll(bpffsDeviceNameDir(bpf.CiliumPath(), defaults.VxlanDevice))
 		os.RemoveAll(bpfStateDeviceDir(defaults.VxlanDevice))
+		os.RemoveAll(bpffsDeviceNameDir(bpf.CiliumPath(), defaults.GeneveDevice))
 		os.RemoveAll(bpfStateDeviceDir(defaults.GeneveDevice))
-
 		return nil
 	}
 
@@ -194,17 +223,18 @@ func reinitializeOverlay(ctx context.Context, logger *slog.Logger, reg *registry
 		return fmt.Errorf("failed to retrieve link for interface %s: %w", iface, err)
 	}
 
-	if err := replaceOverlayDatapath(ctx, logger, reg, lnc, link); err != nil {
+	if err := replaceOverlayDatapath(ctx, logger, reg, collLoader, lnc, link); err != nil {
 		return fmt.Errorf("failed to load overlay programs: %w", err)
 	}
 
 	return nil
 }
 
-func reinitializeWireguard(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry, lnc *datapath.LocalNodeConfiguration) (err error) {
+func reinitializeWireguard(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry, collLoader *bpfCollectionLoader, lnc *config.Config) (err error) {
 	if !lnc.EnableWireguard {
 		cleanCallsMaps("cilium_calls_wireguard*")
 
+		os.RemoveAll(bpffsDeviceNameDir(bpf.CiliumPath(), wgTypes.IfaceName))
 		os.RemoveAll(bpfStateDeviceDir(wgTypes.IfaceName))
 
 		return
@@ -215,14 +245,14 @@ func reinitializeWireguard(ctx context.Context, logger *slog.Logger, reg *regist
 		return fmt.Errorf("failed to retrieve link for interface %s: %w", wgTypes.IfaceName, err)
 	}
 
-	if err := replaceWireguardDatapath(ctx, logger, reg, lnc, link); err != nil {
+	if err := replaceWireguardDatapath(ctx, logger, reg, collLoader, lnc, link); err != nil {
 		return fmt.Errorf("failed to load wireguard programs: %w", err)
 	}
 	return
 }
 
 func reinitializeXDPLocked(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry,
-	lnc *datapath.LocalNodeConfiguration, devices []string) error {
+	collLoader *bpfCollectionLoader, lnc *config.Config, devices []string) error {
 	xdpConfig := lnc.XDPConfig
 	maybeUnloadObsoleteXDPPrograms(logger, devices, xdpConfig.Mode(), bpf.CiliumPath())
 	if xdpConfig.Disabled() {
@@ -237,7 +267,7 @@ func reinitializeXDPLocked(ctx context.Context, logger *slog.Logger, reg *regist
 			continue
 		}
 
-		if err := compileAndLoadXDPProg(ctx, logger, reg, lnc, dev, xdpConfig.Mode()); err != nil {
+		if err := compileAndLoadXDPProg(ctx, logger, reg, collLoader, lnc, dev, xdpConfig.Mode()); err != nil {
 			if option.Config.NodePortAcceleration == option.XDPModeBestEffort {
 				logger.Info("Failed to attach XDP program, ignoring due to best-effort mode",
 					logfields.Error, err,
@@ -265,7 +295,7 @@ func (l *loader) ReinitializeHostDev(ctx context.Context, mtu int) error {
 // BPF programs, netfilter rule configuration and reserving routes in IPAM for
 // locally detected prefixes. It may be run upon initial Cilium startup, after
 // restore from a previous Cilium run, or during regular Cilium operation.
-func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfiguration, tunnelConfig tunnel.Config, iptMgr datapath.IptablesManager, p datapath.Proxy, bigtcp datapath.BigTCPConfiguration) error {
+func (l *loader) Reinitialize(ctx context.Context, lnc *config.Config, tunnelConfig tunnel.Config, iptMgr iptables.Manager, p proxy.Proxy, bigtcp bigtcp.Config) error {
 	sysSettings := []tables.Sysctl{
 		{Name: []string{"net", "core", "bpf_jit_enable"}, Val: "1", IgnoreErr: true, Warn: "Unable to ensure that BPF JIT compilation is enabled. This can be ignored when Cilium is running inside non-host network namespace (e.g. with kind or minikube)"},
 		{Name: []string{"net", "ipv4", "conf", "all", "rp_filter"}, Val: "0", IgnoreErr: false},
@@ -306,19 +336,6 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfig
 		return fmt.Errorf("failed to setup base devices: %w", err)
 	}
 
-	if option.Config.UnsafeDaemonConfigOption.EnableIPIPDevices {
-		// This setting needs to be applied before creating the IPIP devices.
-		sysIPIP := []tables.Sysctl{
-			{Name: []string{"net", "core", "fb_tunnels_only_for_init_net"}, Val: "2", IgnoreErr: true},
-		}
-		if err := l.sysctl.ApplySettings(sysIPIP); err != nil {
-			return err
-		}
-		if err := setupIPIPDevices(l.logger, l.sysctl, option.Config.IPv4Enabled(), option.Config.IPv6Enabled(), lnc.DeviceMTU); err != nil {
-			return fmt.Errorf("unable to create ipip devices: %w", err)
-		}
-	}
-
 	if err := setupTunnelDevice(l.logger, l.sysctl, tunnelConfig.EncapProtocol(), tunnelConfig.Port(),
 		tunnelConfig.SrcPortLow(), tunnelConfig.SrcPortHigh(), lnc.DeviceMTU, bigtcp); err != nil {
 		return fmt.Errorf("failed to setup %s tunnel device: %w", tunnelConfig.EncapProtocol(), err)
@@ -326,8 +343,11 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfig
 
 	if option.Config.IPAM == ipamOption.IPAMENI {
 		var err error
-		if sysSettings, err = addENIRules(l.logger, sysSettings); err != nil {
+		if sysSettings, err = addIPv4ENIRules(l.logger, sysSettings); err != nil {
 			return fmt.Errorf("unable to install ip rule for ENI multi-node NodePort: %w", err)
+		}
+		if err = addIPv6ENIRules(); err != nil {
+			return fmt.Errorf("unable to install ipv6 ip rule for ENI multi-node NodePort: %w", err)
 		}
 	}
 
@@ -375,7 +395,7 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfig
 		if err := compileWithOptions(ctx, l.logger, socketProg, socketObj, nil); err != nil {
 			logging.Fatal(l.logger, "failed to compile bpf_sock.c", logfields.Error, err)
 		}
-		if err := socketlb.Enable(l.logger, l.registry, l.sysctl, lnc); err != nil {
+		if err := socketlb.Enable(ctx, l.logger, l.registry, l.bpfCollectionLoader, l.sysctl, lnc); err != nil {
 			return err
 		}
 	} else {
@@ -384,7 +404,7 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfig
 		}
 	}
 
-	if err := reinitializeXDPLocked(ctx, l.logger, l.registry, lnc, devices); err != nil {
+	if err := reinitializeXDPLocked(ctx, l.logger, l.registry, l.bpfCollectionLoader, lnc, devices); err != nil {
 		logging.Fatal(l.logger, "Failed to compile XDP program", logfields.Error, err)
 	}
 
@@ -397,11 +417,11 @@ func (l *loader) Reinitialize(ctx context.Context, lnc *datapath.LocalNodeConfig
 		logging.Fatal(l.logger, "C and Go structs alignment check failed", logfields.Error, err)
 	}
 
-	if err := reinitializeWireguard(ctx, l.logger, l.registry, lnc); err != nil {
+	if err := reinitializeWireguard(ctx, l.logger, l.registry, l.bpfCollectionLoader, lnc); err != nil {
 		return err
 	}
 
-	if err := reinitializeOverlay(ctx, l.logger, l.registry, lnc, tunnelConfig); err != nil {
+	if err := reinitializeOverlay(ctx, l.logger, l.registry, l.bpfCollectionLoader, lnc, tunnelConfig); err != nil {
 		return err
 	}
 

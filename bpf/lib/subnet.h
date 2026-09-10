@@ -18,18 +18,13 @@ struct subnet_key {
 	__u8 pad1;
 	__u8 family;
 	union {
-		struct {
-			__u32		ip4;
-			__u32		pad2;
-			__u32		pad3;
-			__u32		pad4;
-		};
+		union v4addr	ip4;
 		union v6addr	ip6;
 	};
 } __packed;
 
 struct subnet_value {
-    __u32 identity;
+	__u32 identity;
 };
 
 /* CIDR -> Subnet Identity map */
@@ -66,11 +61,11 @@ static __always_inline __maybe_unused __u32
 subnet_lookup6(const void *map, const union v6addr *addr)
 {
 	__u32 prefix = V6_SUBNET_KEY_LEN;
-	struct subnet_key key = {
-		.lpm_key = { SUBNET_PREFIX_LEN(prefix), {} },
-		.family = ENDPOINT_KEY_IPV6,
-		.ip6 = *addr,
-	};
+	struct subnet_key key = {};
+
+	key.lpm_key.prefixlen = SUBNET_PREFIX_LEN(prefix);
+	key.family = ENDPOINT_KEY_IPV6;
+	key.ip6 = *addr;
 
 	/* Normalize the key before lookup.
 	 * Clear the lower bits of the IPv6 address according to the prefix length.
@@ -88,16 +83,15 @@ static __always_inline __maybe_unused __u32
 subnet_lookup4(const void *map, __be32 addr)
 {
 	__u32 prefix = V4_SUBNET_KEY_LEN;
-	struct subnet_key key = {
-		.lpm_key = { SUBNET_PREFIX_LEN(prefix), {} },
-		.family = ENDPOINT_KEY_IPV4,
-		.ip4 = addr,
-	};
+	struct subnet_key key = {};
+
+	key.lpm_key.prefixlen = SUBNET_PREFIX_LEN(prefix);
+	key.family = ENDPOINT_KEY_IPV4;
 
 	/* Normalize the key before lookup.
 	 * Clear the lower bits of the IPv4 address according to the prefix length.
 	 */
-	key.ip4 &= GET_PREFIX(prefix);
+	key.ip4.be32 = addr & GET_PREFIX(prefix);
 
 	return subnet_lookup(map, &key);
 }
@@ -106,3 +100,33 @@ subnet_lookup4(const void *map, __be32 addr)
 	subnet_lookup6(&cilium_subnet_map, addr)
 #define lookup_ip4_subnet_id(addr) \
 	subnet_lookup4(&cilium_subnet_map, addr)
+
+/* is_subnet_same_id4 returns true if both addresses have the same ID and it's
+ * different than zero.
+ */
+static __always_inline __maybe_unused bool
+is_subnet_same_id4(__be32 saddr, __be32 daddr)
+{
+	__u32 sid, did;
+
+	sid = lookup_ip4_subnet_id(saddr);
+	if (sid == 0)
+		return false;
+	did = lookup_ip4_subnet_id(daddr);
+	return sid == did;
+}
+
+/* is_subnet_same_id6 returns true if both addresses have the same ID and it's
+ * different than zero.
+ */
+static __always_inline __maybe_unused bool
+is_subnet_same_id6(const union v6addr *saddr, const union v6addr *daddr)
+{
+	__u32 sid, did;
+
+	sid = lookup_ip6_subnet_id(saddr);
+	if (sid == 0)
+		return false;
+	did = lookup_ip6_subnet_id(daddr);
+	return sid == did;
+}

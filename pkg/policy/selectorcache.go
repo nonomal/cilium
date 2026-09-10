@@ -245,7 +245,7 @@ type SelectorCache struct {
 	// selector (adding/removing selectors/identities) and is always kept open and committed on
 	// request. Updates from all concurrent callers are pooled to the same write transaction
 	// until Commit() is called.
-	// There may be no other write transactions on 'selections'.
+	// There may be no other write transactions on 'readableSelections'.
 	writeableSelections types.SelectorWriteTxn
 
 	// idCache contains all known identities as informed by the
@@ -275,10 +275,13 @@ type SelectorCache struct {
 	userHandlerDone chan struct{}
 }
 
-// GetReadTxn returns a read-only state of the current selectors in the selector cache.
-// The returned SelectorReadTxn should be Close()d as soon as possible to limit memory use.
+// GetSelectorSnapshot returns a read-only state of the current selectors in the selector cache.
+// The returned SelectorSnapshot should be Invalidate()d if stored on the heap and not needed any more.
 func (sc *SelectorCache) GetSelectorSnapshot() SelectorSnapshot {
-	return *sc.readTxn.Load()
+	if sc != nil {
+		return *sc.readTxn.Load()
+	}
+	return SelectorSnapshot{}
 }
 
 // WithRLock calls the given function with the selector cache locked for reading, so that the caller
@@ -870,4 +873,19 @@ func (sc *SelectorCache) UpdateIdentities(added, deleted identity.IdentityMap, w
 		sc.queueNotifiedUsersCommit(readTxn, wg)
 	}
 	return mutated
+}
+
+// getIdentities captures the current set of identities.
+// Used for debugging, staging, and testing.
+func (sc *SelectorCache) getIdentities() identity.IdentityMap {
+	sc.mutex.RLock()
+	defer sc.mutex.RUnlock()
+
+	out := make(identity.IdentityMap, len(sc.idCache.ids))
+
+	for nid, id := range sc.idCache.ids {
+		out[nid] = id.lbls
+	}
+
+	return out
 }

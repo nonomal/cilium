@@ -14,16 +14,19 @@ import (
 	"github.com/cilium/cilium/pkg/metrics"
 	policytypes "github.com/cilium/cilium/pkg/policy/types"
 	"github.com/cilium/cilium/pkg/source"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 func (p *policyWatcher) addK8sClusterNetworkPolicy(k8sCNP *policyv1alpha2.ClusterNetworkPolicy, apiGroup string, dc chan uint64, clusterName string) error {
+	initialRecvTime := time.Now()
+
 	defer func() {
 		p.k8sResourceSynced.SetEventTimestamp(apiGroup)
 	}()
 
 	rules, err := k8s.ParseClusterNetworkPolicy(p.log, clusterName, k8sCNP)
 	if err != nil {
-		metrics.PolicyChangeTotal.WithLabelValues(metrics.LabelValueOutcomeFail).Inc()
+		metrics.PolicyChangeTotal.WithLabelValues(string(source.Kubernetes), metrics.LabelValueUpdateOperation, metrics.LabelValueOutcomeFail).Inc()
 		p.log.Error(
 			"Error while parsing k8s kubernetes ClusterNetworkPolicy",
 			logfields.Error, err,
@@ -44,10 +47,11 @@ func (p *policyWatcher) addK8sClusterNetworkPolicy(k8sCNP *policyv1alpha2.Cluste
 			k8sCNP.ObjectMeta.Namespace,
 			k8sCNP.ObjectMeta.Name,
 		),
-		DoneChan: dc,
+		ProcessingStartTime: initialRecvTime,
+		DoneChan:            dc,
 	})
 
-	metrics.PolicyChangeTotal.WithLabelValues(metrics.LabelValueOutcomeSuccess).Inc()
+	metrics.PolicyChangeTotal.WithLabelValues(string(source.Kubernetes), metrics.LabelValueUpdateOperation, metrics.LabelValueOutcomeSuccess).Inc()
 	p.log.Info(
 		"ClusterNetworkPolicy successfully added",
 		logfields.K8sClusterNetworkPolicyName, k8sCNP.ObjectMeta.Name,
@@ -57,6 +61,8 @@ func (p *policyWatcher) addK8sClusterNetworkPolicy(k8sCNP *policyv1alpha2.Cluste
 }
 
 func (p *policyWatcher) deleteK8sClusterNetworkPolicy(k8sCNP *policyv1alpha2.ClusterNetworkPolicy, apiGroup string, dc chan uint64) error {
+	initialRecvTime := time.Now()
+
 	defer func() {
 		p.k8sResourceSynced.SetEventTimestamp(apiGroup)
 	}()
@@ -77,10 +83,11 @@ func (p *policyWatcher) deleteK8sClusterNetworkPolicy(k8sCNP *policyv1alpha2.Clu
 			k8sCNP.ObjectMeta.Namespace,
 			k8sCNP.ObjectMeta.Name,
 		),
-		DoneChan: dc,
+		ProcessingStartTime: initialRecvTime,
+		DoneChan:            dc,
 	})
 
-	metrics.PolicyChangeTotal.WithLabelValues(metrics.LabelValueOutcomeSuccess).Inc()
+	metrics.PolicyChangeTotal.WithLabelValues(string(source.Kubernetes), metrics.LabelValueDeleteOperation, metrics.LabelValueOutcomeSuccess).Inc()
 	p.log.Info(
 		"ClusterNetworkPolicy successfully removed",
 		logfields.K8sClusterNetworkPolicyName, k8sCNP.ObjectMeta.Name,

@@ -14,10 +14,12 @@ import (
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/linux/bigtcp"
+	"github.com/cilium/cilium/pkg/datapath/linux/config"
 	routeReconciler "github.com/cilium/cilium/pkg/datapath/linux/route/reconciler"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
+	"github.com/cilium/cilium/pkg/datapath/loader/types"
+	"github.com/cilium/cilium/pkg/datapath/prefilter"
 	"github.com/cilium/cilium/pkg/datapath/tables"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/endpointstate"
 	"github.com/cilium/cilium/pkg/maps/callsmap"
@@ -46,11 +48,12 @@ type loader struct {
 	hostDpInitializedOnce sync.Once
 	hostDpInitialized     chan struct{}
 
-	sysctl             sysctl.Sysctl
-	prefilter          datapath.PreFilter
-	compilationLock    datapath.CompilationLock
-	configWriter       datapath.ConfigWriter
-	nodeConfigNotifier *manager.NodeConfigNotifier
+	sysctl              sysctl.Sysctl
+	prefilter           prefilter.PreFilter
+	compilationLock     types.CompilationLock
+	configWriter        config.Writer
+	nodeConfigNotifier  *manager.NodeConfigNotifier
+	bpfCollectionLoader *bpfCollectionLoader
 
 	db           *statedb.DB
 	devices      statedb.Table[*tables.Device]
@@ -64,15 +67,15 @@ type Params struct {
 	JobGroup           job.Group
 	Logger             *slog.Logger
 	Sysctl             sysctl.Sysctl
-	Prefilter          datapath.PreFilter
-	CompilationLock    datapath.CompilationLock
-	ConfigWriter       datapath.ConfigWriter
+	Prefilter          prefilter.PreFilter
+	CompilationLock    types.CompilationLock
+	ConfigWriter       config.Writer
 	NodeConfigNotifier *manager.NodeConfigNotifier
 	RouteManager       *routeReconciler.DesiredRouteManager
 	DB                 *statedb.DB
 	Devices            statedb.Table[*tables.Device]
 	EPRestorer         promise.Promise[endpointstate.Restorer]
-	BIGTCPConfig       *bigtcp.Configuration
+	BIGTCPConfig       bigtcp.Config
 
 	// Force map initialisation before loader.
 	bpf.MapGroup
@@ -81,20 +84,25 @@ type Params struct {
 // newLoader returns a new loader.
 func newLoader(p Params) *loader {
 	registerRouteInitializer(p)
+	collLoader := newBPFCollectionLoader(
+		option.Config.EnableDatapathPlugins,
+		bpffsPluginsOperationsDir(bpf.CiliumPath()),
+	)
+	collLoader.runGC(p.Logger, p.JobGroup)
 	return &loader{
-		logger:             p.Logger,
-		templateCache:      newObjectCache(p.Logger, p.ConfigWriter, filepath.Join(option.Config.StateDir, defaults.TemplatesDir)),
-		registry:           p.MapRegistry,
-		sysctl:             p.Sysctl,
-		hostDpInitialized:  make(chan struct{}),
-		prefilter:          p.Prefilter,
-		compilationLock:    p.CompilationLock,
-		configWriter:       p.ConfigWriter,
-		nodeConfigNotifier: p.NodeConfigNotifier,
-		routeManager:       p.RouteManager,
-
-		db:      p.DB,
-		devices: p.Devices,
+		logger:              p.Logger,
+		templateCache:       newObjectCache(p.Logger, p.ConfigWriter, filepath.Join(option.Config.StateDir, defaults.TemplatesDir)),
+		registry:            p.MapRegistry,
+		sysctl:              p.Sysctl,
+		hostDpInitialized:   make(chan struct{}),
+		prefilter:           p.Prefilter,
+		compilationLock:     p.CompilationLock,
+		configWriter:        p.ConfigWriter,
+		nodeConfigNotifier:  p.NodeConfigNotifier,
+		routeManager:        p.RouteManager,
+		bpfCollectionLoader: collLoader,
+		db:                  p.DB,
+		devices:             p.Devices,
 	}
 }
 

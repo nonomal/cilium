@@ -59,6 +59,7 @@ func (r *reconciler[Obj]) reconcileLoop(ctx context.Context, health cell.Health)
 
 	incremental := incremental[Obj]{
 		moduleID:       r.ModuleID,
+		name:           r.config.Name,
 		metrics:        r.config.Metrics,
 		config:         &r.config,
 		retries:        r.retries,
@@ -136,8 +137,8 @@ func (r *reconciler[Obj]) prune(ctx context.Context, txn statedb.ReadTxn) error 
 		r.Log.Warn("Reconciler: failed to prune objects", "error", err, "pruneInterval", r.config.PruneInterval)
 		err = fmt.Errorf("prune: %w", err)
 	}
-	r.config.Metrics.PruneDuration(r.ModuleID, time.Since(start))
-	r.config.Metrics.PruneError(r.ModuleID, err)
+	r.config.Metrics.PruneDuration(r.ModuleID, r.config.Name, time.Since(start))
+	r.config.Metrics.PruneError(r.ModuleID, r.config.Name, err)
 	return err
 }
 
@@ -191,7 +192,11 @@ func (r *reconciler[Obj]) refreshLoop(ctx context.Context, health cell.Health) e
 				// Mark the object for refreshing. We make the assumption that refreshing is spread over
 				// time enough that batching of the writes is not useful here.
 				wtxn := r.DB.WriteTxn(r.config.Table)
-				obj, newRev, ok := r.config.Table.Get(wtxn, indexer.QueryFromObject(obj))
+				query, hasKey := indexer.QueryFromObject(obj)
+				if !hasKey {
+					continue
+				}
+				obj, newRev, ok := r.config.Table.Get(wtxn, query)
 				if ok && rev == newRev {
 					obj = r.config.SetObjectStatus(r.config.CloneObject(obj), StatusRefreshing())
 					r.config.Table.Insert(wtxn, obj)

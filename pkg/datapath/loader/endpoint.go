@@ -24,7 +24,7 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
 	"github.com/cilium/cilium/pkg/datapath/tables"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
+	endpoint "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/callsmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
@@ -45,14 +45,14 @@ const (
 
 // epConfigs holds functions that yield a BPF configuration object for
 // an endpoint.
-var epConfigs funcRegistry[func(datapath.EndpointConfiguration, *datapath.LocalNodeConfiguration) any]
+var epConfigs funcRegistry[func(endpoint.Config, *config.Config) any]
 
 // epRenames holds functions that yield the map renames for an endpoint
-var epRenames funcRegistry[func(datapath.EndpointConfiguration, *datapath.LocalNodeConfiguration) map[string]string]
+var epRenames funcRegistry[func(endpoint.Config, *config.Config) map[string]string]
 
 // endpointConfiguration returns a slice of endpoint configuration objects
 // yielded by all registered config providers.
-func endpointConfiguration(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration) (configs []any) {
+func endpointConfiguration(ep endpoint.Config, lnc *config.Config) (configs []any) {
 	for f := range epConfigs.all() {
 		configs = append(configs, f(ep, lnc))
 	}
@@ -60,7 +60,7 @@ func endpointConfiguration(ep datapath.EndpointConfiguration, lnc *datapath.Loca
 }
 
 // endpointMapRenames returns the merged map of endpoint map renames yielded by all registered rename providers.
-func endpointMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration) (renames []map[string]string) {
+func endpointMapRenames(ep endpoint.Config, lnc *config.Config) (renames []map[string]string) {
 	for f := range epRenames.all() {
 		renames = append(renames, f(ep, lnc))
 	}
@@ -80,7 +80,7 @@ func endpointMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.LocalNo
 // CompileOrLoad with the same configuration parameters. When the first
 // goroutine completes compilation of the template, all other CompileOrLoad
 // invocations will be released.
-func (l *loader) ReloadDatapath(ctx context.Context, ep datapath.Endpoint, lnc *datapath.LocalNodeConfiguration, stats *metrics.SpanStat) (string, error) {
+func (l *loader) ReloadDatapath(ctx context.Context, ep endpoint.Endpoint, lnc *config.Config, stats *metrics.SpanStat) (string, error) {
 	dirs := directoryInfo{
 		Library: option.Config.BpfDir,
 		Runtime: option.Config.StateDir,
@@ -88,7 +88,7 @@ func (l *loader) ReloadDatapath(ctx context.Context, ep datapath.Endpoint, lnc *
 		Output:  ep.StateDir(),
 	}
 
-	spec, hash, err := l.templateCache.fetchOrCompile(ctx, lnc, ep, &dirs, stats)
+	spec, hash, err := l.templateCache.fetchOrCompile(ctx, ep, &dirs, stats)
 	if err != nil {
 		return "", err
 	}
@@ -96,7 +96,7 @@ func (l *loader) ReloadDatapath(ctx context.Context, ep datapath.Endpoint, lnc *
 	if ep.IsHost() {
 		// Reload bpf programs on cilium_host and cilium_net.
 		stats.BpfLoadProg.Start()
-		err = reloadHostEndpoint(l.logger, l.registry, ep, lnc, spec)
+		err = reloadHostEndpoint(ctx, l.logger, l.registry, l.bpfCollectionLoader, ep, lnc, spec)
 		stats.BpfLoadProg.End(err == nil)
 
 		l.hostDpInitializedOnce.Do(func() {
@@ -109,13 +109,13 @@ func (l *loader) ReloadDatapath(ctx context.Context, ep datapath.Endpoint, lnc *
 
 	// Reload an lxc endpoint program.
 	stats.BpfLoadProg.Start()
-	err = reloadEndpoint(l.logger, l.registry, l.db, l.devices, l.routeManager, ep, lnc, spec)
+	err = reloadEndpoint(ctx, l.logger, l.registry, l.bpfCollectionLoader, l.db, l.devices, l.routeManager, ep, lnc, spec)
 	stats.BpfLoadProg.End(err == nil)
 	return hash, err
 }
 
 // Unload removes the datapath specific program aspects
-func (l *loader) Unload(ep datapath.Endpoint) {
+func (l *loader) Unload(ep endpoint.Endpoint) {
 	if ep.RequireEndpointRoute() {
 		if ip := ep.IPv4Address(); ip.IsValid() {
 			removeEndpointRoute(ep, l.routeManager)
@@ -171,20 +171,20 @@ func (l *loader) Unload(ep datapath.Endpoint) {
 
 // EndpointHash hashes the specified endpoint configuration with the current
 // datapath hash cache and returns the hash as string.
-func (l *loader) EndpointHash(cfg datapath.EndpointConfiguration, lnCfg *datapath.LocalNodeConfiguration) (string, error) {
+func (l *loader) EndpointHash(cfg endpoint.Config, lnCfg *config.Config) (string, error) {
 	return l.templateCache.baseHash.hashEndpoint(l.templateCache, lnCfg, cfg)
 }
 
-func (l *loader) WriteEndpointConfig(w io.Writer, e datapath.EndpointConfiguration, lnCfg *datapath.LocalNodeConfiguration) error {
-	return l.configWriter.WriteEndpointConfig(w, lnCfg, e)
+func (l *loader) WriteEndpointConfig(w io.Writer, e endpoint.Config) error {
+	return l.configWriter.WriteEndpointConfig(w, e)
 }
 
 // defaultEndpointMapRenames returns map rename operations for an endpoint.
-func defaultEndpointMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration) map[string]string {
+func defaultEndpointMapRenames(ep endpoint.Config, lnc *config.Config) map[string]string {
 	return map[string]string{
 		// Rename the calls and policy maps to include the endpoint's id.
-		"cilium_calls":     bpf.LocalMapName(callsmap.MapName, uint16(ep.GetID())),
-		"cilium_policy_v2": bpf.LocalMapName(policymap.MapName, uint16(ep.GetID())),
+		"cilium_calls":  bpf.LocalMapName(callsmap.MapName, uint16(ep.GetID())),
+		"cilium_policy": bpf.LocalMapName(policymap.MapName, uint16(ep.GetID())),
 	}
 }
 
@@ -192,12 +192,12 @@ func defaultEndpointMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.
 //
 // spec is modified by the method and it is the callers responsibility to copy
 // it if necessary.
-func reloadEndpoint(logger *slog.Logger, reg *registry.MapRegistry, db *statedb.DB,
-	devices statedb.Table[*tables.Device], rm *routeReconciler.DesiredRouteManager,
-	ep datapath.Endpoint, lnc *datapath.LocalNodeConfiguration, spec *ebpf.CollectionSpec) error {
+func reloadEndpoint(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry, collLoader *bpfCollectionLoader,
+	db *statedb.DB, devices statedb.Table[*tables.Device], rm *routeReconciler.DesiredRouteManager,
+	ep endpoint.Endpoint, lnc *config.Config, spec *ebpf.CollectionSpec) error {
 
 	var obj lxcObjects
-	commit, err := bpf.LoadAndAssign(logger, &obj, spec, &bpf.CollectionOptions{
+	commit, cleanup, err := collLoader.LoadAndAssign(ctx, logger, &obj, spec, &bpf.CollectionOptions{
 		MapRegistry: reg,
 		CollectionOptions: ebpf.CollectionOptions{
 			Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
@@ -205,10 +205,11 @@ func reloadEndpoint(logger *slog.Logger, reg *registry.MapRegistry, db *statedb.
 		Constants:      endpointConfiguration(ep, lnc),
 		MapRenames:     endpointMapRenames(ep, lnc),
 		ConfigDumpPath: filepath.Join(ep.StateDir(), endpointConfig),
-	})
+	}, lnc, attachmentContextLXC(ep), bpffsEndpointPluginPinsDir(bpf.CiliumPath(), ep))
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	defer obj.Close()
 
 	// Insert policy programs before attaching entrypoints to tc hooks.
@@ -297,7 +298,7 @@ func registerRouteInitializer(p Params) {
 	}))
 }
 
-func upsertEndpointRoute(db *statedb.DB, devices statedb.Table[*tables.Device], rm *routeReconciler.DesiredRouteManager, ep datapath.Endpoint, ip netip.Prefix) error {
+func upsertEndpointRoute(db *statedb.DB, devices statedb.Table[*tables.Device], rm *routeReconciler.DesiredRouteManager, ep endpoint.Endpoint, ip netip.Prefix) error {
 	owner, err := rm.GetOrRegisterOwner("endpoint/" + ep.StringID())
 	if err != nil {
 		return fmt.Errorf("getting or registering owner for endpoint %s: %w", ep.StringID(), err)
@@ -315,7 +316,7 @@ func upsertEndpointRoute(db *statedb.DB, devices statedb.Table[*tables.Device], 
 	for {
 		var found bool
 		var watch <-chan struct{}
-		epDev, _, watch, found = devices.GetWatch(db.ReadTxn(), tables.DeviceIDIndex.Query(ep.GetIfIndex()))
+		epDev, _, watch, found = devices.GetWatch(db.ReadTxn(), tables.DeviceByIndex(ep.GetIfIndex()))
 		if found {
 			break
 		}
@@ -338,7 +339,7 @@ func upsertEndpointRoute(db *statedb.DB, devices statedb.Table[*tables.Device], 
 	})
 }
 
-func removeEndpointRoute(ep datapath.Endpoint, rm *routeReconciler.DesiredRouteManager) error {
+func removeEndpointRoute(ep endpoint.Endpoint, rm *routeReconciler.DesiredRouteManager) error {
 	owner, err := rm.GetOwner("endpoint/" + ep.StringID())
 	if err != nil {
 		if errors.Is(err, routeReconciler.ErrOwnerDoesNotExist) {

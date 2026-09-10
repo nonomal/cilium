@@ -298,6 +298,13 @@ func (k *K8sStatusCollector) podStatus(ctx context.Context, status *Status, name
 			status.AddAggregatedWarning(name, pod.Name, fmt.Errorf("pod is pending"))
 		case corev1.PodRunning, corev1.PodSucceeded:
 		case corev1.PodFailed:
+			// A pod rejected by admission or evicted before its workload ran
+			// is terminal and already superseded by a healthy replacement from
+			// the controller. The Deployment/DaemonSet gate remains authoritative
+			// for real availability, so don't fail the status on such leftovers.
+			if k8s.IsSupersededPodRejection(pod.Status.Reason) {
+				break
+			}
 			status.AddAggregatedError(name, pod.Name, fmt.Errorf("pod has failed: %s - %s", pod.Status.Reason, pod.Status.Message))
 		}
 

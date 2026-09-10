@@ -6,24 +6,63 @@
 package ipam
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/hive/job"
+	"github.com/spf13/pflag"
 
-	"github.com/cilium/cilium/pkg/ipam/allocator/clusterpool"
-	ipamMetrics "github.com/cilium/cilium/pkg/ipam/metrics"
+	allocatorTypes "github.com/cilium/cilium/operator/pkg/ipam/allocator"
+	"github.com/cilium/cilium/operator/pkg/ipam/allocator/clusterpool"
+	ipamMetrics "github.com/cilium/cilium/operator/pkg/ipam/metrics"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/option"
 )
+
+// ClusterPoolConfig contains the configuration for the ClusterPool IPAM allocator.
+type ClusterPoolConfig struct {
+	ClusterPoolIPv4CIDR     []string
+	ClusterPoolIPv4MaskSize int
+	ClusterPoolIPv6CIDR     []string
+	ClusterPoolIPv6MaskSize int
+}
+
+var defaultClusterPoolConfig = ClusterPoolConfig{
+	ClusterPoolIPv4CIDR:     []string{},
+	ClusterPoolIPv4MaskSize: 24,
+	ClusterPoolIPv6CIDR:     []string{},
+	ClusterPoolIPv6MaskSize: 112,
+}
+
+// Flags registers the flags for ClusterPoolConfig.
+func (cfg ClusterPoolConfig) Flags(flags *pflag.FlagSet) {
+	flags.StringSlice("cluster-pool-ipv4-cidr", defaultClusterPoolConfig.ClusterPoolIPv4CIDR,
+		fmt.Sprintf("IPv4 CIDR Range for Pods in cluster. Requires '%s=%s' and '%s=%s'",
+			option.IPAM, ipamOption.IPAMClusterPool,
+			option.EnableIPv4Name, "true"))
+	flags.Int("cluster-pool-ipv4-mask-size", defaultClusterPoolConfig.ClusterPoolIPv4MaskSize,
+		fmt.Sprintf("Mask size for each IPv4 podCIDR per node. Requires '%s=%s' and '%s=%s'",
+			option.IPAM, ipamOption.IPAMClusterPool,
+			option.EnableIPv4Name, "true"))
+	flags.StringSlice("cluster-pool-ipv6-cidr", defaultClusterPoolConfig.ClusterPoolIPv6CIDR,
+		fmt.Sprintf("IPv6 CIDR Range for Pods in cluster. Requires '%s=%s' and '%s=%s'",
+			option.IPAM, ipamOption.IPAMClusterPool,
+			option.EnableIPv6Name, "true"))
+	flags.Int("cluster-pool-ipv6-mask-size", defaultClusterPoolConfig.ClusterPoolIPv6MaskSize,
+		fmt.Sprintf("Mask size for each IPv6 podCIDR per node. Requires '%s=%s' and '%s=%s'",
+			option.IPAM, ipamOption.IPAMClusterPool,
+			option.EnableIPv6Name, "true"))
+}
 
 func init() {
 	allocators = append(allocators, cell.Module(
 		"clusterpool-ipam-allocator",
 		"Cluster Pool IP Allocator",
 
+		cell.Config(defaultClusterPoolConfig),
 		cell.Invoke(startClusterPoolAllocator),
 	))
 }
@@ -37,7 +76,8 @@ type clusterPoolParams struct {
 	Clientset          k8sClient.Clientset
 	IPAMMetrics        *ipamMetrics.Metrics
 	DaemonCfg          *option.DaemonConfig
-	NodeWatcherFactory nodeWatcherJobFactory
+	ClusterPoolCfg     ClusterPoolConfig
+	NodeWatcherFactory allocatorTypes.NodeWatcherJobFactory
 }
 
 func startClusterPoolAllocator(p clusterPoolParams) {
@@ -45,7 +85,12 @@ func startClusterPoolAllocator(p clusterPoolParams) {
 		return
 	}
 
-	allocator := &clusterpool.AllocatorOperator{}
+	allocator := &clusterpool.AllocatorOperator{
+		ClusterPoolIPv4CIDR:     p.ClusterPoolCfg.ClusterPoolIPv4CIDR,
+		ClusterPoolIPv4MaskSize: p.ClusterPoolCfg.ClusterPoolIPv4MaskSize,
+		ClusterPoolIPv6CIDR:     p.ClusterPoolCfg.ClusterPoolIPv6CIDR,
+		ClusterPoolIPv6MaskSize: p.ClusterPoolCfg.ClusterPoolIPv6MaskSize,
+	}
 
 	p.Lifecycle.Append(
 		cell.Hook{
@@ -54,12 +99,15 @@ func startClusterPoolAllocator(p clusterPoolParams) {
 					return fmt.Errorf("unable to init ClusterPool allocator: %w", err)
 				}
 
-				nm, err := allocator.Start(ctx, &ciliumNodeUpdateImplementation{p.Clientset}, p.IPAMMetrics.K8sSyncTrigger())
-				if err != nil {
-					return fmt.Errorf("unable to start ClusterPool allocator: %w", err)
-				}
-
-				p.JobGroup.Add(p.NodeWatcherFactory(nm))
+				p.JobGroup.Add(p.NodeWatcherFactory(
+					func(ctx context.Context) (allocatorTypes.NodeEventHandler, error) {
+						nm, err := allocator.Start(ctx, &ciliumNodeUpdateImplementation{p.Clientset}, p.IPAMMetrics.K8sSyncTrigger())
+						if err != nil {
+							return nil, fmt.Errorf("unable to start ClusterPool allocator: %w", err)
+						}
+						return nm, nil
+					},
+				))
 
 				return nil
 			},

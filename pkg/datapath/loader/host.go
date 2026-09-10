@@ -4,6 +4,7 @@
 package loader
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -15,8 +16,8 @@ import (
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/config"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
+	endpoint "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/callsmap"
 	"github.com/cilium/cilium/pkg/maps/policymap"
@@ -43,18 +44,19 @@ const (
 
 // reloadHostEndpoint (re)attaches programs from bpf_host.c to cilium_host,
 // cilium_net and external (native) devices.
-func reloadHostEndpoint(logger *slog.Logger, reg *registry.MapRegistry, ep datapath.Endpoint,
-	lnc *datapath.LocalNodeConfiguration, spec *ebpf.CollectionSpec) error {
+func reloadHostEndpoint(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry,
+	collLoader *bpfCollectionLoader, ep endpoint.Endpoint,
+	lnc *config.Config, spec *ebpf.CollectionSpec) error {
 	// Replace programs on cilium_host.
-	if err := attachCiliumHost(logger, reg, ep, lnc, spec); err != nil {
+	if err := attachCiliumHost(ctx, logger, reg, collLoader, ep, lnc, spec); err != nil {
 		return fmt.Errorf("attaching cilium_host: %w", err)
 	}
 
-	if err := attachCiliumNet(logger, reg, ep, lnc, spec); err != nil {
+	if err := attachCiliumNet(ctx, logger, reg, collLoader, ep, lnc, spec); err != nil {
 		return fmt.Errorf("attaching cilium_host: %w", err)
 	}
 
-	if err := attachNetworkDevices(logger, reg, ep, lnc, spec); err != nil {
+	if err := attachNetworkDevices(ctx, logger, reg, collLoader, ep, lnc, spec); err != nil {
 		return fmt.Errorf("attaching cilium_host: %w", err)
 	}
 
@@ -63,14 +65,14 @@ func reloadHostEndpoint(logger *slog.Logger, reg *registry.MapRegistry, ep datap
 
 // ciliumHostConfigs holds functions that yield a BPF configuration object for
 // cilium_host.
-var ciliumHostConfigs funcRegistry[func(datapath.EndpointConfiguration, *datapath.LocalNodeConfiguration) any]
+var ciliumHostConfigs funcRegistry[func(endpoint.Config, *config.Config) any]
 
 // ciliumHostRenames holds functions that yield BPF map renames for cilium_host.
-var ciliumHostRenames funcRegistry[func(datapath.EndpointConfiguration, *datapath.LocalNodeConfiguration) map[string]string]
+var ciliumHostRenames funcRegistry[func(endpoint.Config, *config.Config) map[string]string]
 
 // ciliumHostConfiguration returns a slice of host configuration objects yielded
 // by all registered config providers of [ciliumHostConfigs].
-func ciliumHostConfiguration(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration) (configs []any) {
+func ciliumHostConfiguration(ep endpoint.Config, lnc *config.Config) (configs []any) {
 	for f := range ciliumHostConfigs.all() {
 		configs = append(configs, f(ep, lnc))
 	}
@@ -78,32 +80,33 @@ func ciliumHostConfiguration(ep datapath.EndpointConfiguration, lnc *datapath.Lo
 }
 
 // ciliumHostMapRenames returns the merged map of host map renames yielded by all registered rename providers.
-func ciliumHostMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration) (renames []map[string]string) {
+func ciliumHostMapRenames(ep endpoint.Config, lnc *config.Config) (renames []map[string]string) {
 	for f := range ciliumHostRenames.all() {
 		renames = append(renames, f(ep, lnc))
 	}
 	return renames
 }
 
-func defaultCiliumHostMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration) map[string]string {
+func defaultCiliumHostMapRenames(ep endpoint.Config, lnc *config.Config) map[string]string {
 	return map[string]string{
 		// Rename calls and policy maps to include the host endpoint's id.
-		"cilium_calls":     bpf.LocalMapName(callsmap.HostMapName, uint16(ep.GetID())),
-		"cilium_policy_v2": bpf.LocalMapName(policymap.MapName, uint16(ep.GetID())),
+		"cilium_calls":  bpf.LocalMapName(callsmap.HostMapName, uint16(ep.GetID())),
+		"cilium_policy": bpf.LocalMapName(policymap.MapName, uint16(ep.GetID())),
 	}
 }
 
 // attachCiliumHost inserts the host endpoint's policy program into the global
 // cilium_call_policy map and attaches programs from bpf_host.c to cilium_host.
-func attachCiliumHost(logger *slog.Logger, reg *registry.MapRegistry, ep datapath.Endpoint,
-	lnc *datapath.LocalNodeConfiguration, spec *ebpf.CollectionSpec) error {
+func attachCiliumHost(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry,
+	collLoader *bpfCollectionLoader, ep endpoint.Endpoint,
+	lnc *config.Config, spec *ebpf.CollectionSpec) error {
 	host, err := safenetlink.LinkByName(ep.InterfaceName())
 	if err != nil {
 		return fmt.Errorf("retrieving device %s: %w", ep.InterfaceName(), err)
 	}
 
 	var hostObj hostObjects
-	commit, err := bpf.LoadAndAssign(logger, &hostObj, spec, &bpf.CollectionOptions{
+	commit, cleanup, err := collLoader.LoadAndAssign(ctx, logger, &hostObj, spec, &bpf.CollectionOptions{
 		MapRegistry: reg,
 		CollectionOptions: ebpf.CollectionOptions{
 			Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
@@ -111,10 +114,11 @@ func attachCiliumHost(logger *slog.Logger, reg *registry.MapRegistry, ep datapat
 		Constants:      ciliumHostConfiguration(ep, lnc),
 		MapRenames:     ciliumHostMapRenames(ep, lnc),
 		ConfigDumpPath: filepath.Join(bpfStateDeviceDir(ep.InterfaceName()), hostEndpointConfig),
-	})
+	}, lnc, attachmentContextHost(ep, host), bpffsDevicePluginPinsTcDir(bpf.CiliumPath(), host))
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	defer hostObj.Close()
 
 	// Insert host endpoint policy program.
@@ -142,14 +146,14 @@ func attachCiliumHost(logger *slog.Logger, reg *registry.MapRegistry, ep datapat
 
 // ciliumNetConfigs holds functions that yield a BPF configuration object for
 // cilium_net.
-var ciliumNetConfigs funcRegistry[func(datapath.EndpointConfiguration, *datapath.LocalNodeConfiguration, netlink.Link) any]
+var ciliumNetConfigs funcRegistry[func(endpoint.Config, *config.Config, netlink.Link) any]
 
 // ciliumNetRenames holds functions that yield BPF map renames for cilium_net.
-var ciliumNetRenames funcRegistry[func(datapath.EndpointConfiguration, *datapath.LocalNodeConfiguration, netlink.Link) map[string]string]
+var ciliumNetRenames funcRegistry[func(endpoint.Config, *config.Config, netlink.Link) map[string]string]
 
 // ciliumNetConfiguration returns a slice of BPF configuration objects yielded
 // by all registered config providers of [ciliumNetConfigs].
-func ciliumNetConfiguration(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration, link netlink.Link) (configs []any) {
+func ciliumNetConfiguration(ep endpoint.Config, lnc *config.Config, link netlink.Link) (configs []any) {
 	for f := range ciliumNetConfigs.all() {
 		configs = append(configs, f(ep, lnc, link))
 	}
@@ -157,32 +161,33 @@ func ciliumNetConfiguration(ep datapath.EndpointConfiguration, lnc *datapath.Loc
 }
 
 // ciliumHostMapRenames returns the merged map of cilium_net map renames yielded by all registered rename providers.
-func ciliumNetMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration, link netlink.Link) (renames []map[string]string) {
+func ciliumNetMapRenames(ep endpoint.Config, lnc *config.Config, link netlink.Link) (renames []map[string]string) {
 	for f := range ciliumNetRenames.all() {
 		renames = append(renames, f(ep, lnc, link))
 	}
 	return renames
 }
 
-func defaultCiliumNetMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration, link netlink.Link) map[string]string {
+func defaultCiliumNetMapRenames(ep endpoint.Config, lnc *config.Config, link netlink.Link) map[string]string {
 	return map[string]string{
 		// Rename the calls map to include cilium_net's ifindex.
 		"cilium_calls": bpf.LocalMapName(callsmap.NetdevMapName, uint16(link.Attrs().Index)),
 		// Rename the policy map to include the host endpoint's id.
-		"cilium_policy_v2": bpf.LocalMapName(policymap.MapName, uint16(ep.GetID())),
+		"cilium_policy": bpf.LocalMapName(policymap.MapName, uint16(ep.GetID())),
 	}
 }
 
 // attachCiliumNet attaches programs from bpf_host.c to cilium_net.
-func attachCiliumNet(logger *slog.Logger, reg *registry.MapRegistry, ep datapath.Endpoint,
-	lnc *datapath.LocalNodeConfiguration, spec *ebpf.CollectionSpec) error {
+func attachCiliumNet(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry,
+	collLoader *bpfCollectionLoader, ep endpoint.Endpoint,
+	lnc *config.Config, spec *ebpf.CollectionSpec) error {
 	net, err := safenetlink.LinkByName(defaults.SecondHostDevice)
 	if err != nil {
 		return fmt.Errorf("retrieving device %s: %w", defaults.SecondHostDevice, err)
 	}
 
 	var netObj hostNetObjects
-	commit, err := bpf.LoadAndAssign(logger, &netObj, spec, &bpf.CollectionOptions{
+	commit, cleanup, err := collLoader.LoadAndAssign(ctx, logger, &netObj, spec, &bpf.CollectionOptions{
 		MapRegistry: reg,
 		CollectionOptions: ebpf.CollectionOptions{
 			Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
@@ -190,10 +195,11 @@ func attachCiliumNet(logger *slog.Logger, reg *registry.MapRegistry, ep datapath
 		Constants:      ciliumNetConfiguration(ep, lnc, net),
 		MapRenames:     ciliumNetMapRenames(ep, lnc, net),
 		ConfigDumpPath: filepath.Join(bpfStateDeviceDir(defaults.SecondHostDevice), hostEndpointConfig),
-	})
+	}, lnc, attachmentContextHost(ep, net), bpffsDevicePluginPinsTcDir(bpf.CiliumPath(), net))
 	if err != nil {
 		return err
 	}
+	defer cleanup()
 	defer netObj.Close()
 
 	// Attach cil_to_host to cilium_net.
@@ -211,15 +217,15 @@ func attachCiliumNet(logger *slog.Logger, reg *registry.MapRegistry, ep datapath
 
 // netdevConfigs holds functions that yield a BPF configuration object for
 // attaching instances of bpf_host.c to externally-facing network devices.
-var netdevConfigs funcRegistry[func(datapath.EndpointConfiguration, *datapath.LocalNodeConfiguration, netlink.Link, netip.Addr, netip.Addr) any]
+var netdevConfigs funcRegistry[func(endpoint.Config, *config.Config, netlink.Link, netip.Addr, netip.Addr) any]
 
 // netdevRenames holds functions that yield BPF map renames for
 // attaching instances of bpf_host.c to externally-facing network devices.
-var netdevRenames funcRegistry[func(datapath.EndpointConfiguration, *datapath.LocalNodeConfiguration, netlink.Link) map[string]string]
+var netdevRenames funcRegistry[func(endpoint.Config, *config.Config, netlink.Link) map[string]string]
 
 // netdevConfiguration returns a slice of host configuration objects yielded
 // by all registered config providers of [netdevConfigs].
-func netdevConfiguration(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration, link netlink.Link, masq4, masq6 netip.Addr) (configs []any) {
+func netdevConfiguration(ep endpoint.Config, lnc *config.Config, link netlink.Link, masq4, masq6 netip.Addr) (configs []any) {
 	for f := range netdevConfigs.all() {
 		configs = append(configs, f(ep, lnc, link, masq4, masq6))
 	}
@@ -227,41 +233,27 @@ func netdevConfiguration(ep datapath.EndpointConfiguration, lnc *datapath.LocalN
 }
 
 // netdevMapRenames returns the merged map of netdev map renames yielded by all registered rename providers.
-func netdevMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration, link netlink.Link) (renames []map[string]string) {
+func netdevMapRenames(ep endpoint.Config, lnc *config.Config, link netlink.Link) (renames []map[string]string) {
 	for f := range netdevRenames.all() {
 		renames = append(renames, f(ep, lnc, link))
 	}
 	return renames
 }
 
-func defaultNetdevMapRenames(ep datapath.EndpointConfiguration, lnc *datapath.LocalNodeConfiguration, link netlink.Link) map[string]string {
+func defaultNetdevMapRenames(ep endpoint.Config, lnc *config.Config, link netlink.Link) map[string]string {
 	return map[string]string{
 		// Rename the calls map to include the device's ifindex.
 		"cilium_calls": bpf.LocalMapName(callsmap.NetdevMapName, uint16(link.Attrs().Index)),
 		// Rename the policy map to include the host's endpoint id.
-		"cilium_policy_v2": bpf.LocalMapName(policymap.MapName, uint16(ep.GetID())),
+		"cilium_policy": bpf.LocalMapName(policymap.MapName, uint16(ep.GetID())),
 	}
 }
 
 // attachNetworkDevices attaches programs from bpf_host.c to externally-facing
 // devices and the wireguard device. Attaches cil_from_netdev to ingress and
 // optionally cil_to_netdev to egress if enabled features require it.
-func attachNetworkDevices(logger *slog.Logger, reg *registry.MapRegistry, ep datapath.Endpoint, lnc *datapath.LocalNodeConfiguration, spec *ebpf.CollectionSpec) error {
+func attachNetworkDevices(ctx context.Context, logger *slog.Logger, reg *registry.MapRegistry, collLoader *bpfCollectionLoader, ep endpoint.Endpoint, lnc *config.Config, spec *ebpf.CollectionSpec) error {
 	devices := lnc.DeviceNames()
-
-	// Selectively attach bpf_host to cilium_ipip{4,6} in order to have a
-	// service lookup after IPIP termination. Do not attach in case of the
-	// devices being created via health datapath (see Reinitialize()) since
-	// it can push packets up the local stack which should be handled by
-	// the host instead.
-	if option.Config.EnableIPIPTermination && !option.Config.UnsafeDaemonConfigOption.EnableHealthDatapath {
-		if option.Config.IPv4Enabled() {
-			devices = append(devices, defaults.IPIPv4Device)
-		}
-		if option.Config.IPv6Enabled() {
-			devices = append(devices, defaults.IPIPv6Device)
-		}
-	}
 
 	// Replace programs on physical devices, ignoring devices that don't exist.
 	for _, device := range devices {
@@ -280,7 +272,7 @@ func attachNetworkDevices(logger *slog.Logger, reg *registry.MapRegistry, ep dat
 			option.Config.EnableIPv4Masquerade, option.Config.EnableIPv6Masquerade)
 
 		var netdevObj hostNetdevObjects
-		commit, err := bpf.LoadAndAssign(logger, &netdevObj, spec, &bpf.CollectionOptions{
+		commit, cleanup, err := collLoader.LoadAndAssign(ctx, logger, &netdevObj, spec, &bpf.CollectionOptions{
 			MapRegistry: reg,
 			CollectionOptions: ebpf.CollectionOptions{
 				Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
@@ -288,10 +280,11 @@ func attachNetworkDevices(logger *slog.Logger, reg *registry.MapRegistry, ep dat
 			Constants:      netdevConfiguration(ep, lnc, iface, masq4, masq6),
 			MapRenames:     netdevMapRenames(ep, lnc, iface),
 			ConfigDumpPath: filepath.Join(bpfStateDeviceDir(iface.Attrs().Name), hostEndpointConfig),
-		})
+		}, lnc, attachmentContextHost(ep, iface), bpffsDevicePluginPinsTcDir(bpf.CiliumPath(), iface))
 		if err != nil {
 			return err
 		}
+		defer cleanup()
 		defer netdevObj.Close()
 
 		// Attach cil_from_netdev to ingress.

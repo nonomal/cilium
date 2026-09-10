@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/identity"
 	ipcachetypes "github.com/cilium/cilium/pkg/ipcache/types"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
@@ -298,8 +299,9 @@ func TestWildcardL3RulesIngress(t *testing.T) {
 						{Port: "9090", Protocol: api.ProtoTCP},
 					},
 					Rules: &api.L7Rules{
-						L7Proto: "tester",
-						L7:      []api.PortRuleL7{map[string]string{"method": "GET", "path": "/"}},
+						HTTP: []api.PortRuleHTTP{
+							{Method: "GET", Path: "/"},
+						},
 					},
 				}},
 			},
@@ -398,11 +400,10 @@ func TestWildcardL3RulesIngress(t *testing.T) {
 			PerSelectorPolicies: L7DataMap{
 				td.cachedSelectorBar2: &PerSelectorPolicy{
 					Verdict:          types.Allow,
-					L7Parser:         L7ParserType("tester"),
-					ListenerPriority: ListenerPriorityNone,
+					L7Parser:         ParserTypeHTTP,
+					ListenerPriority: ListenerPriorityHTTP,
 					L7Rules: api.L7Rules{
-						L7Proto: "tester",
-						L7:      []api.PortRuleL7{l7Rule.Ingress[0].ToPorts[0].Rules.L7[0]},
+						HTTP: []api.PortRuleHTTP{httpRule.Ingress[0].ToPorts[0].Rules.HTTP[0]},
 					},
 				},
 			},
@@ -916,15 +917,17 @@ func TestWildcardL3RulesIngressFromEntities(t *testing.T) {
 			Protocol: "ANY",
 			U8Proto:  0x0,
 			PerSelectorPolicies: L7DataMap{
-				td.cachedSelectorWorld:   nil,
-				td.cachedSelectorWorldV4: nil,
-				td.cachedSelectorWorldV6: nil,
+				td.cachedSelectorWorld:          nil,
+				td.cachedSelectorWorldV4:        nil,
+				td.cachedSelectorWorldV6:        nil,
+				td.cachedSelectorAggregateWorld: nil,
 			},
 			Ingress: true,
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
-				td.cachedSelectorWorld:   {labelsL3},
-				td.cachedSelectorWorldV4: {labelsL3},
-				td.cachedSelectorWorldV6: {labelsL3},
+				td.cachedSelectorWorld:          {labelsL3},
+				td.cachedSelectorWorldV4:        {labelsL3},
+				td.cachedSelectorWorldV6:        {labelsL3},
+				td.cachedSelectorAggregateWorld: {labelsL3},
 			}),
 		},
 		"80/TCP": {
@@ -1014,15 +1017,17 @@ func TestWildcardL3RulesEgressToEntities(t *testing.T) {
 			Protocol: "ANY",
 			U8Proto:  0x0,
 			PerSelectorPolicies: L7DataMap{
-				td.cachedSelectorWorld:   nil,
-				td.cachedSelectorWorldV4: nil,
-				td.cachedSelectorWorldV6: nil,
+				td.cachedSelectorWorld:          nil,
+				td.cachedSelectorWorldV4:        nil,
+				td.cachedSelectorWorldV6:        nil,
+				td.cachedSelectorAggregateWorld: nil,
 			},
 			Ingress: false,
 			RuleOrigin: OriginForTest(map[CachedSelector]labels.LabelArrayList{
-				td.cachedSelectorWorld:   {labelsL3},
-				td.cachedSelectorWorldV4: {labelsL3},
-				td.cachedSelectorWorldV6: {labelsL3},
+				td.cachedSelectorWorld:          {labelsL3},
+				td.cachedSelectorWorldV4:        {labelsL3},
+				td.cachedSelectorWorldV6:        {labelsL3},
+				td.cachedSelectorAggregateWorld: {labelsL3},
 			}),
 		},
 		"53/UDP": {
@@ -1125,7 +1130,7 @@ func TestMinikubeGettingStarted(t *testing.T) {
 		},
 	}
 
-	expected := NewL4PolicyMapWithValues(map[string]*L4Filter{"TCP/80": {
+	expected := NewL4PolicyMapWithValues(map[string]*L4Filter{"80/TCP": {
 		Port: 80, Protocol: api.ProtoTCP, U8Proto: 6,
 		PerSelectorPolicies: L7DataMap{
 			td.cachedSelectorB: &PerSelectorPolicy{
@@ -1329,7 +1334,7 @@ func TestDefaultAllow(t *testing.T) {
 func TestReplaceByResource(t *testing.T) {
 	// don't use the full testdata() here, since we want to watch
 	// selectorcache changes carefully
-	repo := NewPolicyRepository(hivetest.Logger(t), nil, nil, nil, nil, testpolicy.NewPolicyMetricsNoop())
+	repo := NewPolicyRepository(hivetest.Logger(t), cmtypes.DefaultClusterInfo, nil, nil, nil, nil, testpolicy.NewPolicyMetricsNoop())
 	sc := testNewSelectorCache(t, hivetest.Logger(t), nil)
 	assert.True(t, sc.selectors.Empty())
 	repo.subjectSelectorCache = sc
@@ -1464,4 +1469,68 @@ func TestReplaceByResource(t *testing.T) {
 	assert.Empty(t, repo.rulesByResource)
 	assert.True(t, sc.selectors.Empty())
 	assert.Equal(t, 2, oldRuleCnt)
+}
+
+func TestRepositorySnapshot(t *testing.T) {
+	logger := hivetest.Logger(t)
+	td := newTestData(t, logger).withIDs(ruleTestIDs)
+	orig := td.repo
+
+	resource := ipcachetypes.ResourceID("foo")
+
+	r1 := policytypes.PolicyEntry{
+		Verdict:     types.Allow,
+		Subject:     labelSelectorA,
+		Labels:      labels.LabelArray{labels.NewLabel(k8sConst.PolicyLabelName, "r1", labels.LabelSourceAny)},
+		Ingress:     true,
+		L3:          types.ToSelectors(endpointSelectorC),
+		DefaultDeny: true,
+	}
+
+	r2 := policytypes.PolicyEntry{
+		Verdict:     types.Deny,
+		Subject:     types.NewLabelSelector(endpointSelectorB),
+		Labels:      labels.LabelArray{labels.NewLabel(k8sConst.PolicyLabelName, "r2", labels.LabelSourceAny)},
+		Ingress:     true,
+		L3:          types.ToSelectors(endpointSelectorC),
+		DefaultDeny: true,
+	}
+	orig.ReplaceByResource(policytypes.PolicyEntries{&r1}, resource)
+
+	// Resolve policy for an endpoint
+	selPolicy, err := td.repo.resolvePolicyLocked(idA)
+	require.NoError(t, err)
+	defer selPolicy.Detach()
+	epPolicy := selPolicy.DistillPolicy(logger, DummyOwner{logger: logger}, nil)
+	epPolicy.Ready()
+
+	// Now, take a snapshot.
+	snap, _ := orig.Snapshot(logger, nil, nil)
+
+	assert.Equal(t, orig.selectorCache.getIdentities(), snap.selectorCache.getIdentities())
+	beforeRules := orig.GetRulesList().Policy
+	assert.Equal(t, beforeRules, snap.GetRulesList().Policy)
+
+	// Add a new identity to the "real" policy engine
+
+	// Ensure that adding a new identity to the "original" does not appear in the second
+	td.addIdentity(fooIdentity)
+	assert.NotEqual(t, orig.selectorCache.getIdentities(), snap.selectorCache.getIdentities())
+
+	// Ensure the cloned selector caches make sense:
+	// - no peer selectors, as we've not yet resolved policy
+	// - one subject selector, as we added a new policy
+	assert.Empty(t, snap.selectorCache.selectors.selectors, 0)
+
+	assert.Len(t, snap.subjectSelectorCache.selectors.selectors, 1)
+	assert.Len(t, orig.subjectSelectorCache.selectors.selectors, 1)
+
+	// Ensure that changing `snap` does not touch `orig`
+	snap.ReplaceByResource(policytypes.PolicyEntries{&r2}, "bar")
+	assert.NotEqual(t, orig.GetRulesList().Policy, snap.GetRulesList().Policy)
+	assert.NotEqual(t, orig.subjectSelectorCache.GetModel(), snap.subjectSelectorCache.GetModel())
+	assert.Len(t, snap.subjectSelectorCache.selectors.selectors, 2)
+	assert.Len(t, orig.subjectSelectorCache.selectors.selectors, 1)
+
+	assert.Equal(t, beforeRules, orig.GetRulesList().Policy)
 }

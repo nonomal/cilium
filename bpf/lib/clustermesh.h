@@ -4,6 +4,7 @@
 
 #include <bpf/config/node.h>
 
+#include "common.h"
 #include "lib/utils.h"
 
 /*
@@ -33,12 +34,6 @@ static __always_inline __maybe_unused __u32
 get_cluster_id_upper_mask()
 {
 	return (CLUSTER_ID_MAX & ~CLUSTER_ID_LOWER_MASK) << (8 + IDENTITY_LOCAL_BITS);
-}
-
-static __always_inline __maybe_unused __u32
-get_mark_magic_cluster_id_mask()
-{
-	return CLUSTER_ID_LOWER_MASK | get_cluster_id_upper_mask();
 }
 
 static __always_inline __maybe_unused __u32

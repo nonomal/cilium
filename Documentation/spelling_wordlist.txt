@@ -1,5 +1,6 @@
 AArch
 AKS
+ARP
 Alemayhu
 Alibaba
 Aquantia
@@ -94,6 +95,7 @@ Multihop
 Multiprotocol
 Mythbusters
 NDP
+NativeRoutingCIDR
 Neovim
 Netlify
 Netronome
@@ -107,6 +109,7 @@ Pepelnjak
 Perfdash
 Pfaff
 PodCIDR
+PodCIDRList
 Polytechnique
 Portworx
 QCon
@@ -131,13 +134,19 @@ Telco
 Terraform
 Tierney
 ToR
+Triager
 Triagers
+Triaging
 Twilio
 Uncompress
 Uncordon
+VCN
 VM
+VMSS
+VMs
 VMware
 VNet
+VNets
 VPC
 Vagrantcloud
 Vagrantfile
@@ -244,6 +253,7 @@ cli
 clientsets
 cls
 clusterIP
+clusterPoolIPv
 clustermesh
 clustermeshcertgen
 clustermeshes
@@ -262,6 +272,7 @@ configMapKey
 configSources
 configmap
 configs
+conflist
 conntrack
 conntrackGCInterval
 containerd
@@ -308,6 +319,7 @@ demux
 denylist
 dereference
 deserialization
+deserialized
 detections
 dev
 disenroll
@@ -345,6 +357,7 @@ enet
 enetc
 eni
 enqueuing
+entrypoints
 etcd
 etcdinit
 eth
@@ -360,16 +373,21 @@ externalIPs
 externalTrafficPolicy
 externallyCreated
 extraConfig
+extraVolumeMounts
+extraVolumes
 facto
 failover
+falsy
 fcfs
 fec
 fieldAggregate
 filesystem
 filesystems
 firewalling
+formatters
 fortio
 fqdn
+freplace
 fromCIDR
 fromCIDRSet
 fromEndpoints
@@ -665,6 +683,7 @@ powershell
 pprof
 pre
 preconfigured
+preferIpv
 prefilter
 preflight
 preload
@@ -691,6 +710,7 @@ qdisc
 qdiscs
 qede
 qemu
+quantile
 queryable
 queueing
 rST
@@ -712,6 +732,7 @@ reconnections
 recv
 regenerations
 regexes
+reinitialization
 relocations
 removeNodeTaints
 reparsing
@@ -720,8 +741,11 @@ repos
 reproducibility
 reqid
 requireIPv
+reservedRanges
 resizable
+resolvers
 resync
+resyncs
 retpoline
 retransmission
 retransmissions
@@ -742,6 +766,7 @@ seccomp
 secretName
 secretsBackend
 secretsNamespace
+selectorless
 selftest
 selftests
 serverinfo
@@ -779,6 +804,7 @@ subclasses
 subcommand
 subcommands
 subdirectories
+subdirectory
 subfeatures
 subnet
 subnets
@@ -832,6 +858,9 @@ tracepoint
 tracepoints
 tracestate
 transpiling
+triager
+triagers
+truthy
 tsne
 tunables
 tunings
@@ -842,6 +871,7 @@ udp
 ui
 uid
 uint
+unapplied
 unaudited
 uncommented
 uncordon

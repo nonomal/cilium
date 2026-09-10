@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -375,6 +376,39 @@ func (c *Client) ListServices(ctx context.Context, namespace string, options met
 	return c.Clientset.CoreV1().Services(namespace).List(ctx, options)
 }
 
+// transientExecErrorSubstrings are error message fragments that indicate a
+// transient failure of the Kubernetes API server -> kubelet exec proxy rather
+// than a genuine failure of the executed command, and are therefore worth
+// retrying. On managed clusters (seen on AKS) the proxy is occasionally
+// unreachable for tens of seconds at a time. They are intentionally specific to
+// the exec-proxy tunnel so that benign command stderr (e.g. cilium-operator
+// "level=debug" log lines) is not mistaken for a transient error and needlessly
+// retried.
+var transientExecErrorSubstrings = []string{
+	"i/o timeout", // e.g. "dial tcp <apiserver>:443: i/o timeout"
+	"error dialing backend",
+	"unable to upgrade connection",
+	"Bad Gateway",         // HTTP 502
+	"Service Unavailable", // HTTP 503
+	"Gateway Timeout",     // HTTP 504
+	"TLS handshake timeout",
+}
+
+// IsTransientExecError reports whether err looks like a transient failure of
+// the Kubernetes API server exec proxy, as opposed to a genuine failure of the
+// command that was executed in the pod. Callers that exec through the proxy in
+// a loop (e.g. waiting for a NodePort or collecting features) use this to retry
+// proxy blips without treating them as a real result.
+func IsTransientExecError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return slices.ContainsFunc(transientExecErrorSubstrings, func(substr string) bool {
+		return strings.Contains(msg, substr)
+	})
+}
+
 func (c *Client) ExecInPodWithStderr(ctx context.Context, namespace, pod, container string, command []string) (bytes.Buffer, bytes.Buffer, error) {
 	var stdout, stderr bytes.Buffer
 	err := c.ExecInPodWithWriters(ctx, nil, namespace, pod, container, command, &stdout, &stderr)
@@ -648,7 +682,7 @@ func (c *Client) AutodetectFlavor(ctx context.Context) Flavor {
 
 	if context, ok := c.RawConfig.Contexts[c.ContextName()]; ok {
 		if cluster, ok := c.RawConfig.Clusters[context.Cluster]; ok {
-			if strings.HasSuffix(cluster.Server, "eks.amazonaws.com") {
+			if strings.Contains(cluster.Server, ".eks-cluster.") || strings.Contains(cluster.Server, ".eks.") {
 				f.Kind = KindEKS
 				return f
 			} else if strings.HasSuffix(cluster.Server, "azmk8s.io:443") {
@@ -1011,12 +1045,12 @@ func (c *Client) ListCiliumNodes(ctx context.Context) (*ciliumv2.CiliumNodeList,
 	return c.CiliumClientset.CiliumV2().CiliumNodes().List(ctx, metav1.ListOptions{})
 }
 
-func (c *Client) ListCiliumNodeConfigs(ctx context.Context, namespace string, opts metav1.ListOptions) (*ciliumv2alpha1.CiliumNodeConfigList, error) {
-	return c.CiliumClientset.CiliumV2alpha1().CiliumNodeConfigs(namespace).List(ctx, opts)
+func (c *Client) ListCiliumNodeConfigs(ctx context.Context, namespace string, opts metav1.ListOptions) (*ciliumv2.CiliumNodeConfigList, error) {
+	return c.CiliumClientset.CiliumV2().CiliumNodeConfigs(namespace).List(ctx, opts)
 }
 
-func (c *Client) ListCiliumPodIPPools(ctx context.Context, opts metav1.ListOptions) (*ciliumv2alpha1.CiliumPodIPPoolList, error) {
-	return c.CiliumClientset.CiliumV2alpha1().CiliumPodIPPools().List(ctx, opts)
+func (c *Client) ListCiliumL2AnnouncementPolicies(ctx context.Context, opts metav1.ListOptions) (*ciliumv2alpha1.CiliumL2AnnouncementPolicyList, error) {
+	return c.CiliumClientset.CiliumV2alpha1().CiliumL2AnnouncementPolicies().List(ctx, opts)
 }
 
 func (c *Client) GetLogs(ctx context.Context, namespace, name, container string, opts corev1.PodLogOptions, out io.Writer) error {

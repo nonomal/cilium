@@ -10,7 +10,7 @@
 L2 Announcements / L2 Aware LB (Beta)
 *************************************
 
-.. include:: ../beta.rst
+.. include:: /beta.rst
 
 L2 Announcements is a feature which makes services visible and reachable on 
 the local area network. This feature is primarily intended for on-premises
@@ -570,19 +570,18 @@ To enable L2 Pod Announcements, set the following:
            :namespace: kube-system
            :extra-args: --reuse-values
            :set: l2podAnnouncements.enabled=true
-                 l2podAnnouncements.interface=eth0
+                 l2podAnnouncements.interfacePattern='^eth0$'
 
     .. group-tab:: ConfigMap
 
         .. code-block:: yaml
 
             enable-l2-pod-announcements: true
-            l2-pod-announcements-interface: eth0
+            l2-pod-announcements-interface-pattern: "^eth0$"
 
-The ``l2podAnnouncements.interface``/``l2-pod-announcements-interface`` options allows you to specify 
-one interface use to send announcements.  If you would like to send announcements on multiple interfaces, you should use the
-``l2podAnnouncements.interfacePattern``/``l2-pod-announcements-interface-pattern`` option instead. 
-This option takes a regex, matching on multiple interfaces.
+The ``l2podAnnouncements.interfacePattern``/``l2-pod-announcements-interface-pattern`` option takes
+a regex matching the interfaces used to send announcements. To match multiple interfaces, use a regex
+pattern like ``^(eth0|ens1)$``.
 
 .. tabs::
     .. group-tab:: Helm

@@ -12,7 +12,8 @@
 #define IS_BPF_OVERLAY 1
 
 /* WORLD_IPV{4,6}_ID varies based on dualstack being enabled. Real values are
- * written into node_config.h at runtime. */
+ * written into node_config.h at runtime.
+ */
 #define SECLABEL WORLD_ID
 #define SECLABEL_IPV4 WORLD_IPV4_ID
 #define SECLABEL_IPV6 WORLD_IPV6_ID
@@ -59,7 +60,7 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 	bool is_dsr = false;
 
 	/* verifier workaround (dereference of modified ctx ptr) */
-	if (!revalidate_data_pull(ctx, &data, &data_end, &ip6))
+	if (!revalidate_data(ctx, &data, &data_end, &ip6))
 		return DROP_INVALID;
 
 	if (!CONFIG(enable_ipv6_fragments)) {
@@ -118,6 +119,8 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 		if (egress_gw_snat_needed_hook_v6((union v6addr *)&ip6->saddr,
 						  &daddr, &snat_addr,
 						  &egress_ifindex)) {
+			__u32 tbid = EGRESS_GATEWAY_RT_TBID;
+
 			if (ipv6_addr_equals(&snat_addr, &EGRESS_GATEWAY_NO_EGRESS_IP_V6))
 				return DROP_NO_EGRESS_IP;
 
@@ -130,7 +133,7 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 			/* to-netdev@bpf_host handles SNAT, so no need to do it here. */
 			return egress_gw_fib_lookup_and_redirect_v6(ctx, &snat_addr,
 								    &daddr, egress_ifindex,
-								    ext_err);
+								    tbid, ext_err);
 		}
 	}
 #endif /* ENABLE_EGRESS_GATEWAY_COMMON */
@@ -142,7 +145,7 @@ static __always_inline int handle_ipv6(struct __ctx_buff *ctx,
 	 * so this logic is needed to prevent the packets from being handled
 	 * by netfilter in an unintended way.
 	 */
-	if (!is_defined(ENABLE_HOST_ROUTING) && is_dsr) {
+	if (!CONFIG(enable_bpf_host_routing) && is_dsr) {
 		ctx_change_type(ctx, PACKET_HOST);
 		return CTX_ACT_OK;
 	}
@@ -180,8 +183,7 @@ int tail_handle_ipv6(struct __ctx_buff *ctx)
 #ifdef ENABLE_IPV4
 #if defined(ENABLE_CLUSTER_AWARE_ADDRESSING) && defined(ENABLE_INTER_CLUSTER_SNAT)
 static __always_inline int handle_inter_cluster_revsnat(struct __ctx_buff *ctx,
-							__u32 src_sec_identity,
-							__s8 *ext_err)
+							__u32 src_sec_identity)
 {
 	int ret;
 	struct iphdr *ip4;
@@ -197,7 +199,7 @@ static __always_inline int handle_inter_cluster_revsnat(struct __ctx_buff *ctx,
 	};
 	struct trace_ctx trace;
 
-	ret = snat_v4_rev_nat(ctx, &target, &trace, ext_err);
+	ret = snat_v4_rev_nat(ctx, &target, &trace);
 	if (ret != NAT_PUNT_TO_STACK && ret != DROP_NAT_NO_MAPPING) {
 		if (IS_ERR(ret))
 			return ret;
@@ -239,11 +241,10 @@ int tail_handle_inter_cluster_revsnat(struct __ctx_buff *ctx)
 {
 	int ret;
 	__u32 src_sec_identity = ctx_load_and_clear_meta(ctx, CB_SRC_LABEL);
-	__s8 ext_err = 0;
 
-	ret = handle_inter_cluster_revsnat(ctx, src_sec_identity, &ext_err);
+	ret = handle_inter_cluster_revsnat(ctx, src_sec_identity);
 	if (IS_ERR(ret))
-		return send_drop_notify_error_ext(ctx, src_sec_identity, ret, ext_err,
+		return send_drop_notify_error(ctx, src_sec_identity, ret,
 						  METRIC_INGRESS);
 	return ret;
 }
@@ -260,7 +261,7 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 	int ret __maybe_unused;
 
 	/* verifier workaround (dereference of modified ctx ptr) */
-	if (!revalidate_data_pull(ctx, &data, &data_end, &ip4))
+	if (!revalidate_data(ctx, &data, &data_end, &ip4))
 		return DROP_INVALID;
 
 	/* If IPv4 fragmentation is disabled AND an IPv4 fragmented packet is
@@ -286,7 +287,7 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 	if (!ctx_skip_nodeport(ctx)) {
 		bool punt_to_stack = false;
 
-		ret = nodeport_lb4(ctx, ip4, ETH_HLEN, *identity, &punt_to_stack,
+		ret = nodeport_lb4(ctx, ip4, *identity, &punt_to_stack,
 				   ext_err, &is_dsr);
 		/* nodeport_lb4() returns with TC_ACT_REDIRECT for
 		 * traffic to L7 LB. Policy enforcement needs to take
@@ -324,14 +325,14 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 			extract_cluster_id_from_identity(*identity);
 
 		/* When we see inter-cluster communication and if
-		 * the destination is IPV4_INTER_CLUSTER_SNAT, try
-		 * to perform revSNAT. We tailcall from here since
-		 * we saw the complexity issue when we added this
-		 * logic in-line.
+		 * the destination is the configured inter-cluster
+		 * SNAT address, try to perform revSNAT. We tailcall
+		 * from here since we saw the complexity issue when
+		 * we added this logic in-line.
 		 */
 		if (cluster_id_from_identity != 0 &&
 		    cluster_id_from_identity != CONFIG(cluster_id) &&
-		    ip4->daddr == IPV4_INTER_CLUSTER_SNAT) {
+		    ip4->daddr == CONFIG(ipv4_inter_cluster_snat).be32) {
 			ctx_store_meta(ctx, CB_SRC_LABEL, *identity);
 			return tail_call_internal(ctx,
 						  CILIUM_CALL_IPV4_INTER_CLUSTER_REVSNAT,
@@ -356,8 +357,10 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 		__be32 snat_addr, daddr;
 
 		daddr = ip4->daddr;
-		if (egress_gw_snat_needed_hook(ip4->saddr, daddr, &snat_addr,
-					       &egress_ifindex)) {
+		if (egress_gw_snat_needed_hook(ctx, ip4->saddr, daddr, &snat_addr,
+					       &egress_ifindex, false)) {
+			__u32 tbid = EGRESS_GATEWAY_RT_TBID;
+
 			if (snat_addr == EGRESS_GATEWAY_NO_EGRESS_IP)
 				return DROP_NO_EGRESS_IP;
 
@@ -370,7 +373,7 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 			/* to-netdev@bpf_host handles SNAT, so no need to do it here. */
 			return egress_gw_fib_lookup_and_redirect(ctx, snat_addr,
 								 daddr, egress_ifindex,
-								 ext_err);
+								 tbid, ext_err);
 		}
 	}
 #endif /* ENABLE_EGRESS_GATEWAY_COMMON */
@@ -382,7 +385,7 @@ static __always_inline int handle_ipv4(struct __ctx_buff *ctx,
 	 * so this logic is needed to prevent the packets from being handled
 	 * by netfilter in an unintended way.
 	 */
-	if (!is_defined(ENABLE_HOST_ROUTING) && is_dsr) {
+	if (!CONFIG(enable_bpf_host_routing) && is_dsr) {
 		ctx_change_type(ctx, PACKET_HOST);
 		return CTX_ACT_OK;
 	}
@@ -453,7 +456,7 @@ int tail_handle_arp(struct __ctx_buff *ctx)
 	if (unlikely(ret != 0))
 		return send_drop_notify_error(ctx, UNKNOWN_ID, ret, METRIC_EGRESS);
 	if (info->tunnel_endpoint) {
-		fake_info.tunnel_endpoint.ip4 = info->tunnel_endpoint;
+		fake_info.tunnel_endpoint.ip4.be32 = info->tunnel_endpoint;
 		fake_info.flag_has_tunnel_ep = true;
 		ret = __encap_and_redirect_with_nodeid(ctx, &fake_info,
 						       LOCAL_NODE_ID, WORLD_IPV4_ID,
@@ -500,20 +503,24 @@ int cil_from_overlay(struct __ctx_buff *ctx)
 		goto out;
 	}
 
-#if defined(ENABLE_WIREGUARD) && defined(ENABLE_IDENTITY_MARK)
-	/* When wireguard is enabled we should drop any traffic coming through the tunnel
-	 * that previously wasn't marked as decrypted by cilium.
-	 */
-	if (CONFIG(encryption_strict_ingress) && !ctx_is_decrypt(ctx)) {
-		ret = DROP_UNENCRYPTED_TRAFFIC;
+	ret = pull_l3_hdr(ctx, proto);
+	if (ret < 0)
 		goto out;
+
+	if (is_defined(ENABLE_WIREGUARD) && CONFIG(enable_identity_mark)) {
+		/* When wireguard is enabled we should drop any traffic coming through the tunnel
+		 * that previously wasn't marked as decrypted by cilium.
+		 */
+		if (CONFIG(encryption_strict_ingress) && !ctx_is_decrypt(ctx)) {
+			ret = DROP_UNENCRYPTED_TRAFFIC;
+			goto out;
+		}
+		/* We only needed the mark to decide if we need to drop the packet here.
+		 * To not cause any further collision with the `decrypted` variable,
+		 * clear the decrypted bit.
+		 */
+		ctx->mark &= ~MARK_MAGIC_HOST_MASK;
 	}
-	/* We only needed the mark to decide if we need to drop the packet here.
-	 * To not cause any further collision with the `decrypted` variable,
-	 * clear the decrypted bit.
-	 */
-	ctx->mark &= ~MARK_MAGIC_HOST_MASK;
-#endif
 
 	switch (proto) {
 #if defined(ENABLE_IPV4) || defined(ENABLE_IPV6)

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"os"
 	"runtime"
 	"strconv"
 	"sync"
@@ -42,6 +43,7 @@ func TestMain(m *testing.M) {
 		// Force garbage-collection to force finalizers to run and catch
 		// missing Event.Done() calls.
 		runtime.GC()
+		os.Exit(exitCode)
 	}
 	testutils.GoleakVerifyTestMain(m,
 		testutils.GoleakCleanup(cleanup),
@@ -999,8 +1001,7 @@ func BenchmarkResource(b *testing.B) {
 	var wg sync.WaitGroup
 
 	// Feed in b.N nodes as watcher events
-	wg.Add(1)
-	go func() {
+	wg.Go(func() {
 		for i := 0; b.Loop(); i++ {
 			name := fmt.Sprintf("node-%d", i)
 			lw.events <- watch.Event{Type: watch.Added, Object: &corev1.Node{
@@ -1010,8 +1011,7 @@ func BenchmarkResource(b *testing.B) {
 				},
 			}}
 		}
-		wg.Done()
-	}()
+	})
 
 	// Consume the events via the resource
 	for b.Loop() {

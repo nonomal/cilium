@@ -8,17 +8,18 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 
 	"github.com/cilium/hive/cell"
 	"github.com/cilium/statedb"
 
-	"github.com/cilium/cilium/pkg/cidr"
 	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/ipam"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
+	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -58,7 +59,7 @@ func newIPAMInitializer(params ipamInitializerParams) *IPAMInitializer {
 	}
 }
 
-func (r *IPAMInitializer) ConfigureAndStartIPAM(ctx context.Context) {
+func (r *IPAMInitializer) ConfigureAndStartIPAM(ctx context.Context) error {
 	// If the device has been specified, the IPv4AllocPrefix and the
 	// IPv6AllocPrefix were already allocated before the k8s.Init().
 	//
@@ -72,45 +73,37 @@ func (r *IPAMInitializer) ConfigureAndStartIPAM(ctx context.Context) {
 	// Then, we will calculate the IPv4 or IPv6 alloc prefix based on the IPv6
 	// or IPv4 alloc prefix, respectively, retrieved by k8s node annotations.
 	if r.daemonConfig.IPv4Range != autoCIDR {
-		allocCIDR, err := cidr.ParseCIDR(r.daemonConfig.IPv4Range)
+		allocCIDR, err := netip.ParsePrefix(r.daemonConfig.IPv4Range)
 		if err != nil {
-			logging.Fatal(
-				r.logger,
-				"Invalid IPv4 allocation prefix",
-				logfields.Error, err,
-				logfields.V4Prefix, r.daemonConfig.IPv4Range,
-			)
+			return fmt.Errorf("invalid IPv4 allocation prefix --%s %q: %w",
+				option.IPv4Range, r.daemonConfig.IPv4Range, err)
 		}
 
 		r.localNodeStore.Update(func(n *node.LocalNode) {
-			n.IPv4AllocCIDR = allocCIDR
+			n.IPv4AllocCIDR = nodeTypes.PrefixFrom(allocCIDR)
 		})
 	}
 
 	if r.daemonConfig.IPv6Range != autoCIDR {
-		allocCIDR, err := cidr.ParseCIDR(r.daemonConfig.IPv6Range)
+		allocCIDR, err := netip.ParsePrefix(r.daemonConfig.IPv6Range)
 		if err != nil {
-			logging.Fatal(
-				r.logger,
-				"Invalid IPv6 allocation prefix",
-				logfields.Error, err,
-				logfields.V6Prefix, r.daemonConfig.IPv6Range,
-			)
+			return fmt.Errorf("invalid IPv6 allocation prefix --%s %q: %w",
+				option.IPv6Range, r.daemonConfig.IPv6Range, err)
 		}
 
 		r.localNodeStore.Update(func(n *node.LocalNode) {
-			n.IPv6AllocCIDR = allocCIDR
+			n.IPv6AllocCIDR = nodeTypes.PrefixFrom(allocCIDR)
 		})
 	}
 
 	if err := r.AutoComplete(ctx); err != nil {
-		logging.Fatal(r.logger, "Cannot autocomplete node addresses", logfields.Error, err)
+		return fmt.Errorf("cannot autocomplete node addresses: %w", err)
 	}
 
 	// start
 	r.logger.Info("Initializing node addressing")
 	// Set up ipam conf after init() because we might be running d.conf.KVStoreIPv4Registration
-	r.ipam.ConfigureAllocator()
+	return r.ipam.ConfigureAllocator(ctx)
 }
 
 func (r *IPAMInitializer) RestoreFinished() {
@@ -138,25 +131,25 @@ func (r *IPAMInitializer) AutoComplete(ctx context.Context) error {
 		return fmt.Errorf("failed to retrieve local node: %w", err)
 	}
 
-	if r.daemonConfig.EnableIPv6 && ln.IPv6AllocCIDR == nil {
+	if r.daemonConfig.EnableIPv6 && !ln.IPv6AllocCIDR.IsValid() {
 		return fmt.Errorf("IPv6 allocation CIDR is not configured. Please specify --%s", option.IPv6Range)
 	}
 
-	if r.daemonConfig.EnableIPv4 && ln.IPv4AllocCIDR == nil {
+	if r.daemonConfig.EnableIPv4 && !ln.IPv4AllocCIDR.IsValid() {
 		return fmt.Errorf("IPv4 allocation CIDR is not configured. Please specify --%s", option.IPv4Range)
 	}
 
 	return nil
 }
 
-func (r *IPAMInitializer) makeIPv6HostIP() net.IP {
+func (r *IPAMInitializer) makeIPv6HostIP() netip.Addr {
 	ipstr := "fc00::10CA:1"
-	ip := net.ParseIP(ipstr)
-	if ip == nil {
-		logging.Fatal(r.logger, "Unable to parse IP", logfields.IPAddr, ipstr)
+	addr, err := netip.ParseAddr(ipstr)
+	if err != nil {
+		logging.Fatal(r.logger, "Unable to parse IP", logfields.Error, err, logfields.IPAddr, ipstr)
 	}
 
-	return ip
+	return addr
 }
 
 func (r *IPAMInitializer) setDefaultPrefix(device string, localNode *node.LocalNode) {
@@ -175,21 +168,18 @@ func (r *IPAMInitializer) setDefaultPrefix(device string, localNode *node.LocalN
 		ipv4range := localNode.IPv4AllocCIDR
 		ipv6range := localNode.IPv6AllocCIDR
 
-		if ipv4range == nil {
+		if !ipv4range.IsValid() {
 			// If the IPv6AllocRange is not nil then the IPv4 allocation should be
 			// derived from the IPv6AllocRange.
 			//                     vvvv vvvv
 			// FD00:0000:0000:0000:0000:0000:0000:0000
-			if ipv6range != nil {
-				ip = net.IPv4(
-					ipv6range.IP[8],
-					ipv6range.IP[9],
-					ipv6range.IP[10],
-					ipv6range.IP[11])
+			if ipv6range.IsValid() {
+				b := ipv6range.Addr().As16()
+				ip = net.IPv4(b[8], b[9], b[10], b[11])
 			}
 			v4range := fmt.Sprintf(defaults.DefaultIPv4Prefix+"/%d",
 				ip.To4()[3], defaults.DefaultIPv4PrefixLen)
-			_, ip4net, err := net.ParseCIDR(v4range)
+			allocCIDR, err := netip.ParsePrefix(v4range)
 			if err != nil {
 				logging.Panic(r.logger, "BUG: Invalid default IPv4 prefix",
 					logfields.Error, err,
@@ -197,7 +187,7 @@ func (r *IPAMInitializer) setDefaultPrefix(device string, localNode *node.LocalN
 				)
 			}
 
-			localNode.IPv4AllocCIDR = cidr.NewCIDR(ip4net)
+			localNode.IPv4AllocCIDR = nodeTypes.PrefixFrom(allocCIDR)
 			r.logger.Debug(
 				"Using autogenerated IPv4 allocation range",
 				logfields.V4Prefix, localNode.IPv4AllocCIDR,
@@ -214,17 +204,17 @@ func (r *IPAMInitializer) setDefaultPrefix(device string, localNode *node.LocalN
 			// Find a IPv6 node address first
 			addr, _ := node.FirstGlobalV6Addr(device, localNode.GetCiliumInternalIP(isIPv6))
 			if addr == nil {
-				addr = r.makeIPv6HostIP()
+				addr = r.makeIPv6HostIP().AsSlice()
 			}
 			localNode.SetNodeInternalIP(addr)
 		}
 
-		if ipv6range == nil {
+		if !ipv6range.IsValid() {
 			var v6range string
 			var logMessage string
-			if ipv4range != nil {
+			if ipv4range.IsValid() {
 				// The IPv6 allocation should be derived from the IPv4 allocation.
-				ip := localNode.IPv4AllocCIDR.IP
+				ip := localNode.IPv4AllocCIDR.Addr().As4()
 				v6range = fmt.Sprintf("%s%02x%02x:%02x%02x:0:0/%d",
 					r.daemonConfig.IPv6ClusterAllocCIDRBase, ip[0], ip[1], ip[2], ip[3], 96)
 				logMessage = "Using autogenerated IPv6 allocation range from IPv4 allocation"
@@ -243,7 +233,7 @@ func (r *IPAMInitializer) setDefaultPrefix(device string, localNode *node.LocalN
 				logMessage = "Using autogenerated IPv6 allocation range from node IPv6"
 			}
 
-			_, ip6net, err := net.ParseCIDR(v6range)
+			allocCIDR, err := netip.ParsePrefix(v6range)
 			if err != nil {
 				logging.Panic(r.logger, "BUG: Invalid default IPv6 prefix",
 					logfields.Error, err,
@@ -251,7 +241,7 @@ func (r *IPAMInitializer) setDefaultPrefix(device string, localNode *node.LocalN
 				)
 			}
 
-			localNode.IPv6AllocCIDR = cidr.NewCIDR(ip6net)
+			localNode.IPv6AllocCIDR = nodeTypes.PrefixFrom(allocCIDR)
 			r.logger.Debug(
 				logMessage,
 				logfields.V6Prefix, localNode.IPv6AllocCIDR,

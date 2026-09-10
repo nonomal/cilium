@@ -9,10 +9,11 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	mcsapiv1alpha1 "sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+	mcsapiv1beta1 "sigs.k8s.io/mcs-api/pkg/apis/v1beta1"
 
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/metrics/metric"
 )
 
 const subsystem = "mcsapi"
@@ -65,7 +66,7 @@ func (c *mcsAPICollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 func (c *mcsAPICollector) Collect(ch chan<- prometheus.Metric) {
-	svcExportList := mcsapiv1alpha1.ServiceExportList{}
+	svcExportList := mcsapiv1beta1.ServiceExportList{}
 	err := c.client.List(context.Background(), &svcExportList)
 	if err != nil {
 		c.logger.Error("failed to list ServiceExport during metrics collection", logfields.Error, err)
@@ -99,7 +100,7 @@ func (c *mcsAPICollector) Collect(ch chan<- prometheus.Metric) {
 		}
 	}
 
-	svcImportList := mcsapiv1alpha1.ServiceImportList{}
+	svcImportList := mcsapiv1beta1.ServiceImportList{}
 	err = c.client.List(context.Background(), &svcImportList)
 	if err != nil {
 		c.logger.Error("failed to list ServiceImport during metrics collection", logfields.Error, err)
@@ -142,5 +143,21 @@ func (c *mcsAPICollector) Collect(ch chan<- prometheus.Metric) {
 			}
 			ch <- metric
 		}
+	}
+}
+
+type Metrics struct {
+	// TotalServiceExports tracks the number of total MCS-API service exports per remote cluster.
+	TotalServiceExports metric.Vec[metric.Gauge]
+}
+
+func NewMetrics() Metrics {
+	return Metrics{
+		TotalServiceExports: metric.NewGaugeVec(metric.GaugeOpts{
+			Namespace: metrics.CiliumOperatorNamespace,
+			Subsystem: metrics.SubsystemClusterMesh,
+			Name:      "remote_cluster_service_exports",
+			Help:      "The total number of MCS-API service exports in the remote cluster",
+		}, []string{metrics.LabelTargetCluster}),
 	}
 }

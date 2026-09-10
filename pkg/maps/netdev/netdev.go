@@ -9,7 +9,7 @@ import (
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/ebpf"
-	"github.com/cilium/cilium/pkg/types"
+	"github.com/cilium/cilium/pkg/mac"
 )
 
 // Map provides access to the eBPF map cilium_devices.
@@ -20,7 +20,7 @@ type Map interface {
 
 	IterateWithCallback(cb IterateCallback) error
 
-	Clear(ifindex uint32) error
+	Delete(ifindex uint32) error
 }
 
 type netDevMap struct {
@@ -32,10 +32,10 @@ func newNetDevMap() *netDevMap {
 	return &netDevMap{
 		Map: bpf.NewMap(
 			"cilium_devices",
-			ebpf.Array,
+			ebpf.Hash,
 			&index,
 			&DeviceState{},
-			4096,
+			512,
 			0,
 		),
 	}
@@ -64,12 +64,10 @@ func (m *netDevMap) IterateWithCallback(cb IterateCallback) error {
 	})
 }
 
-var zeroDeviceState = DeviceState{}
-
-// Clear resets an entry to the zero value.
-func (m *netDevMap) Clear(ifindex uint32) error {
+// Delete removes an entry from the map.
+func (m *netDevMap) Delete(ifindex uint32) error {
 	key := Index(ifindex)
-	return m.Map.Update(&key, &zeroDeviceState)
+	return m.Map.Delete(&key)
 }
 
 func (m *netDevMap) init() error {
@@ -99,7 +97,7 @@ func (k *Index) String() string {
 
 // DeviceState matches struct device_state in bpf/lib/network_device.h.
 type DeviceState struct {
-	MAC types.MACAddr `align:"mac"`
+	MAC mac.MAC `align:"mac"`
 	_   uint16
 	L3  DeviceStateL3 `align:"l3"`
 	_   uint8         `align:"pad1"`
@@ -107,13 +105,12 @@ type DeviceState struct {
 	_   uint32        `align:"pad3"`
 }
 
-func NewDeviceState(mac net.HardwareAddr) DeviceState {
+func NewDeviceState(ha net.HardwareAddr) DeviceState {
 	state := DeviceState{}
-	if len(mac) == len(state.MAC) {
-		copy(state.MAC[:], mac)
-	}
-	if len(mac) != 6 {
-		state.SetL3(true)
+	if m, err := mac.FromHardwareAddr(ha); err == nil {
+		state.MAC = m
+	} else {
+		state.L3 |= deviceStateL3Mask
 	}
 	return state
 }
@@ -129,16 +126,4 @@ func (s *DeviceState) New() bpf.MapValue {
 
 func (s *DeviceState) String() string {
 	return fmt.Sprintf("%s %b", s.MAC.String(), s.L3)
-}
-
-func (s *DeviceState) IsL3() bool {
-	return s.L3&deviceStateL3Mask != 0
-}
-
-func (s *DeviceState) SetL3(enabled bool) {
-	if enabled {
-		s.L3 |= deviceStateL3Mask
-		return
-	}
-	s.L3 &^= deviceStateL3Mask
 }

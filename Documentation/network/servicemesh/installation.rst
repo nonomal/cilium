@@ -55,7 +55,7 @@ Installation
 
         .. parsed-literal::
 
-            $ cilium install |CHART_VERSION| \\
+            $ cilium install --version |CHART_VERSION| \\
                 --set kubeProxyReplacement=true \\
                 --set ingressController.enabled=true \\
                 --set ingressController.loadbalancerMode=dedicated
@@ -69,7 +69,7 @@ Installation
 
         .. parsed-literal::
 
-            $ cilium install |CHART_VERSION| \\
+            $ cilium install --version |CHART_VERSION| \\
                 --set kubeProxyReplacement=true \\
                 --set envoyConfig.enabled=true
 
@@ -77,7 +77,7 @@ Installation
 
         .. parsed-literal::
 
-            $ cilium install |CHART_VERSION| \\
+            $ cilium install --version |CHART_VERSION| \\
                 --set kubeProxyReplacement=true \\
                 --set envoyConfig.enabled=true \\
                 --set loadBalancer.l7.backend=envoy
@@ -89,4 +89,4 @@ Installation
             $ cilium status
 
 It is also recommended that you :ref:`install Hubble CLI<hubble_cli_install>`
-which will be used used to observe the traffic in later steps.
+which will be used to observe the traffic in later steps.

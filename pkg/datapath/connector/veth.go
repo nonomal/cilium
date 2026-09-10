@@ -6,13 +6,11 @@ package connector
 import (
 	"fmt"
 	"log/slog"
-	"net"
 
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
-	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
 )
@@ -20,7 +18,7 @@ import (
 // setupVethPair sets up the host-facing interface, the peer interface and fills
 // up some endpoint fields such as mac, NodeMac, ifIndex and ifName. Returns a pointer
 // for the created veth, a pointer for the peer link and error if something fails.
-func setupVethPair(defaultLogger *slog.Logger, cfg types.LinkConfig, sysctl sysctl.Sysctl) (*netlink.Veth, netlink.Link, error) {
+func setupVethPair(defaultLogger *slog.Logger, cfg LinkConfig, sysctl sysctl.Sysctl) (*netlink.Veth, netlink.Link, error) {
 	logger := defaultLogger.With(logfields.LogSubsys, "endpoint-connector")
 	// systemd 242+ tries to set a "persistent" MAC addr for any virtual device
 	// by default (controlled by MACAddressPolicy). As setting happens
@@ -42,11 +40,11 @@ func setupVethPair(defaultLogger *slog.Logger, cfg types.LinkConfig, sysctl sysc
 	veth := &netlink.Veth{
 		LinkAttrs: netlink.LinkAttrs{
 			Name:         cfg.HostIfName,
-			HardwareAddr: net.HardwareAddr(epHostMAC),
+			HardwareAddr: epHostMAC.HardwareAddr(),
 			TxQLen:       1000,
 		},
 		PeerName:         cfg.PeerIfName,
-		PeerHardwareAddr: net.HardwareAddr(epLXCMAC),
+		PeerHardwareAddr: epLXCMAC.HardwareAddr(),
 	}
 
 	if err := netlink.LinkAdd(veth); err != nil {

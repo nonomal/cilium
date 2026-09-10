@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"maps"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -43,10 +44,11 @@ func toSlimLabelSelector(ls *metav1.LabelSelector) *slim_metav1.LabelSelector {
 			lsr := slim_metav1.LabelSelectorRequirement{
 				Key:      matchExp.Key,
 				Operator: slim_metav1.LabelSelectorOperator(string(matchExp.Operator)),
-			}
-			if matchExp.Values != nil {
-				lsr.Values = make([]string, 0, len(matchExp.Values))
-				copy(lsr.Values, matchExp.Values)
+				// slices.Clone copies all values (and returns nil for a nil
+				// input). This previously used make([]string, 0, len)+copy,
+				// which silently dropped every value because copy is bounded by
+				// the destination length (0).
+				Values: slices.Clone(matchExp.Values),
 			}
 			result.MatchExpressions = append(result.MatchExpressions, lsr)
 		}
@@ -75,20 +77,27 @@ func kcnpParseNamespacedPod(clusterName string, peer policyv1alpha2.NamespacedPo
 	return types.NewLabelSelector(es)
 }
 
-// kcnpProcessNodeSelector converts a label selector targeting a node into an
+// kcnpProcessNodeSelector converts a label selector targeting nodes into an
 // EndpointSelector. If a cluster name is provided and the pod selector does
 // not already explicitly target a cluster, a selector targeting the named
 // cluster will be added.
 func kcnpProcessNodeSelector(clusterName string, nodeSelector *metav1.LabelSelector) types.Selectors {
 	ns := toSlimLabelSelector(nodeSelector)
-	es := api.NewESFromK8sLabelSelector(labels.LabelSourceNodeKeyPrefix, ns)
-	es.AddMatchExpression(labels.LabelSourceReservedKeyPrefix+labels.IDNameRemoteNode, slim_metav1.LabelSelectorOpExists, []string{})
+
+	// Match local host
+	esHost := api.NewESFromK8sLabelSelector(labels.LabelSourceNodeKeyPrefix, ns)
+	esHost.AddMatchExpression(labels.LabelSourceReservedKeyPrefix+labels.IDNameHost, slim_metav1.LabelSelectorOpExists, []string{})
+
+	// Match all other cluster nodes
+	esRemoteNode := api.NewESFromK8sLabelSelector(labels.LabelSourceNodeKeyPrefix, ns)
+	esRemoteNode.AddMatchExpression(labels.LabelSourceReservedKeyPrefix+labels.IDNameRemoteNode, slim_metav1.LabelSelectorOpExists, []string{})
 
 	if clusterName != cmtypes.PolicyAnyCluster && !isPodSelectorSelectingCluster(ns) {
-		es.AddMatch(clusterPrefixLbl, clusterName)
+		esHost.AddMatch(clusterPrefixLbl, clusterName)
+		esRemoteNode.AddMatch(clusterPrefixLbl, clusterName)
 	}
 
-	return types.ToSelectors(es)
+	return types.ToSelectors(esHost, esRemoteNode)
 }
 
 func kcnpParseCIDRSelectors(cidrs []policyv1alpha2.CIDR) types.Selectors {
@@ -135,7 +144,7 @@ func kcnpParseFQDNSelectors(fqdns []policyv1alpha2.DomainName) (types.Selectors,
 			fqdnSelector.MatchName = string(fqdn)
 		}
 		dnsRule := api.PortRuleDNS(fqdnSelector)
-		if err := dnsRule.Sanitize(); err != nil {
+		if err := dnsRule.Validate(); err != nil {
 			return nil, nil, err
 		}
 		peerSelectors = append(peerSelectors, types.ToSelector(fqdnSelector))

@@ -6,9 +6,6 @@
 #include "pktgen.h"
 #include "scapy.h"
 
-/* We always assume we have BPF Host Routing enabled */
-#define ENABLE_HOST_ROUTING 1
-
 /* Define an endpoint ID that we'll use as index into policy maps. */
 #define TEST_LXC_ID_LOCAL 233
 
@@ -29,6 +26,15 @@ enum {
 };
 
 static unsigned int num_calls[RECORD__MAX] = {};
+
+static __always_inline
+void clear_records(void)
+{
+	/* Reset counters in case a previous scenario ran in the same .o */
+	num_calls[RECORD_TAILCALL] = 0;
+	num_calls[RECORD_REDIRECT] = 0;
+	num_calls[RECORD_REDIRECT_PEER] = 0;
+}
 
 /* Mocked out BPF helpers that we're intending to test usage of. */
 int mock_ctx_redirect(const struct __ctx_buff *ctx __maybe_unused,
@@ -87,6 +93,23 @@ mock_tail_call_dynamic(struct __ctx_buff *ctx __maybe_unused,
 #define ctx_redirect mock_ctx_redirect
 #define ctx_redirect_peer mock_ctx_redirect_peer
 
+/* Override ctx_get_ingress_ifindex so should_redirect_peer() and the
+ * enforce-at-source guard in local_delivery() see a realistic value.
+ * cil_from_host runs on TC ingress of a host device, so the kernel populates
+ * skb->ingress_ifindex (> 0). BPF_PROG_TEST_RUN leaves it at 0 on synthetic
+ * skbs, which would misrepresent the from_host path and, on netkit, hide the
+ * double policy-enforcement regression this test guards against: with
+ * ingress_ifindex > 0 the enforce-at-source block must be taken on netkit too
+ * (the !enable_netkit || ingress_ifindex > 0 arm), so we do a single plain
+ * redirect() and skip the policy tail-call instead of doing both.
+ */
+#define ctx_get_ingress_ifindex mock_ctx_get_ingress_ifindex
+static __always_inline __maybe_unused __u32
+mock_ctx_get_ingress_ifindex(const struct __sk_buff *ctx __maybe_unused)
+{
+	return TEST_HOST_IFACE;
+}
+
 /* Load the appropriate BPF programs. */
 #include "lib/bpf_host.h"
 
@@ -97,19 +120,21 @@ mock_tail_call_dynamic(struct __ctx_buff *ctx __maybe_unused,
  */
 int mock_tail_policy(struct __ctx_buff *ctx)
 {
-	bool do_redirect = ctx_load_meta(ctx, CB_DELIVERY_REDIRECT);
-	bool from_host = ctx_load_and_clear_meta(ctx, CB_FROM_HOST);
-	bool from_tunnel = false;
+	__u32 delivery_flags = ctx_load_meta(ctx, CB_DELIVERY_FLAGS);
+	bool do_redirect = delivery_flags & CB_DELIVERY_FLAGS_REDIRECT;
+	bool from_host = delivery_flags & CB_DELIVERY_FLAGS_FROM_HOST;
+	bool use_redirect_peer = delivery_flags & CB_DELIVERY_FLAGS_USE_REDIRECT_PEER;
 
 	/* We should always be from_host here. */
 	if (do_redirect && from_host)
 		return redirect_ep(ctx, CONFIG(interface_ifindex),
-				   should_redirect_peer(from_host),
-				   from_tunnel);
+				   use_redirect_peer, false);
 
 	/* Failure path */
 	return CTX_ACT_DROP;
 }
+
+ASSIGN_CONFIG(bool, enable_bpf_host_routing, true)
 
 /* Set our host interface index */
 ASSIGN_CONFIG(__u32, interface_ifindex, TEST_HOST_IFACE)
@@ -123,9 +148,20 @@ ASSIGN_CONFIG(bool, enable_netkit, true)
 ASSIGN_CONFIG(bool, enable_netkit, false)
 #endif
 
-/* Source identity so we can validate skb mark. */
+#ifdef __CONFIG_ENABLE_ENDPOINT_ROUTES
+ASSIGN_CONFIG(bool, enable_endpoint_routes, true)
+#else
+ASSIGN_CONFIG(bool, enable_endpoint_routes, false)
+#endif
+
+/* Source identity so we can validate skb mark. With ingress_ifindex > 0 the
+ * enforce-at-source block runs whenever endpoint routes are enabled, on both
+ * veth and netkit, stamping the identity mark. (Without it, only the policy
+ * tail-call runs and the mark stays 0.)
+ */
 #define TEST_SRC_IDENTITY 0xCAFE
-#if !defined(__CONFIG_ENABLE_NETKIT) && defined(USE_BPF_PROG_FOR_INGRESS_POLICY)
+
+#ifdef __CONFIG_ENABLE_ENDPOINT_ROUTES
 #define TEST_SKB_MARK (__u32)((TEST_SRC_IDENTITY << 16) | MARK_MAGIC_IDENTITY)
 #else
 #define TEST_SKB_MARK (__u32)0x0
@@ -138,20 +174,30 @@ ASSIGN_CONFIG(bool, enable_netkit, false)
 
 #ifdef ENABLE_IPV4
 
+/* packet defined in ./scapy/tc_redirect_pkt_defs.py */
+const __u8 tc_redirect_host_ipv4_pre[] = {
+	SCAPY_BUF_BYTES(tc_redirect_host_ipv4_pre)
+};
+
+/* packet defined in ./scapy/tc_redirect_pkt_defs.py */
+const __u8 tc_redirect_host_ipv4_post[] = {
+	SCAPY_BUF_BYTES(tc_redirect_host_ipv4_post)
+};
+
 /* Setup for this test:
  * +--------External--------+    +----------Pod 1---------+
  * | v4_ext_one:high-port   | -> | v4_pod_one:tcp_svc_one |
  * +------------------------+    +------------------------+
  */
-PKTGEN("tc", "tc_redirect_host_ipv4")
+PKTGEN(PROG_TYPE, "tc_redirect_host_ipv4")
 int tc_redirect_host_ipv4_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
 
 	pktgen__init(&builder, ctx);
 
-	BUF_DECL(REDIRECT_HOST_IPV4_PRE, tc_redirect_host_ipv4_pre);
-	BUILDER_PUSH_BUF(builder, REDIRECT_HOST_IPV4_PRE);
+	scapy_push_data(&builder, tc_redirect_host_ipv4_pre,
+			sizeof(tc_redirect_host_ipv4_pre));
 
 	pktgen__finish(&builder);
 
@@ -161,7 +207,7 @@ int tc_redirect_host_ipv4_pktgen(struct __ctx_buff *ctx)
 /* Test that sending a packet from the host into a Pod is correctly forwarded via
  * the appropriate bpf redirect helper.
  */
-SETUP("tc", "tc_redirect_host_ipv4")
+SETUP(PROG_TYPE, "tc_redirect_host_ipv4")
 int tc_redirect_host_ipv4_setup(struct __ctx_buff *ctx)
 {
 	/* Add an IPCache entry for pod 1 */
@@ -174,15 +220,20 @@ int tc_redirect_host_ipv4_setup(struct __ctx_buff *ctx)
 	/* Add source identity to test mark */
 	ipcache_v4_add_entry(v4_ext_one, 0, TEST_SRC_IDENTITY, 0, 0);
 
+	clear_records();
 	return host_send_packet(ctx);
 }
 
-CHECK("tc", "tc_redirect_host_ipv4")
+CHECK(PROG_TYPE, "tc_redirect_host_ipv4")
 int tc_redirect_host_ipv4_check(__maybe_unused const struct __ctx_buff *ctx)
 {
-#ifdef __CONFIG_ENABLE_NETKIT
-	const unsigned int expected[RECORD__MAX] = {1, 1, 0};
-#elif !defined(__CONFIG_ENABLE_NETKIT) && defined(USE_BPF_PROG_FOR_INGRESS_POLICY)
+#ifdef __CONFIG_ENABLE_ENDPOINT_ROUTES
+	/* from_host + ingress_ifindex > 0: the enforce-at-source block is taken
+	 * on both veth and netkit, so a single plain redirect() and no policy
+	 * tail-call. On netkit this is the regression guard for 210b5866e0: the
+	 * !enable_netkit guard alone would fall through to the tail-call AND
+	 * plain redirect, double-enforcing ingress policy.
+	 */
 	const unsigned int expected[RECORD__MAX] = {0, 1, 0};
 #else
 	const unsigned int expected[RECORD__MAX] = {1, 1, 0};
@@ -192,6 +243,8 @@ int tc_redirect_host_ipv4_check(__maybe_unused const struct __ctx_buff *ctx)
 	__u32 *status_code;
 
 	test_init();
+
+	endpoint_v4_del_entry(v4_pod_one);
 
 	data = (void *)(long)ctx->data;
 	data_end = (void *)(long)ctx->data_end;
@@ -221,11 +274,10 @@ int tc_redirect_host_ipv4_check(__maybe_unused const struct __ctx_buff *ctx)
 		test_fatal(TEST_DRIVER_NAME ": Incorrect nunmber of bpf_redirect_peer() calls")
 
 	/* Check the packet. */
-	BUF_DECL(REDIRECT_HOST_IPV4_POST, tc_redirect_host_ipv4_post);
 	ASSERT_CTX_BUF_OFF("tc_redirect_host_ipv4_post",
 			   "Ether", ctx, sizeof(__u32),
-			   REDIRECT_HOST_IPV4_POST,
-			   sizeof(BUF(REDIRECT_HOST_IPV4_POST)));
+			   tc_redirect_host_ipv4_post,
+			   sizeof(tc_redirect_host_ipv4_post));
 
 	test_finish();
 }
@@ -234,20 +286,30 @@ int tc_redirect_host_ipv4_check(__maybe_unused const struct __ctx_buff *ctx)
 
 #ifdef ENABLE_IPV6
 
+/* packet defined in ./scapy/tc_redirect_pkt_defs.py */
+const __u8 tc_redirect_host_ipv6_pre[] = {
+	SCAPY_BUF_BYTES(tc_redirect_host_ipv6_pre)
+};
+
+/* packet defined in ./scapy/tc_redirect_pkt_defs.py */
+const __u8 tc_redirect_host_ipv6_post[] = {
+	SCAPY_BUF_BYTES(tc_redirect_host_ipv6_post)
+};
+
 /* Setup for this test:
  * +--------External--------+    +----------Pod 1---------+
  * | v6_ext_one:high-port   | -> | v6_pod_one:tcp_svc_one |
  * +------------------------+    +------------------------+
  */
-PKTGEN("tc", "tc_redirect_host_ipv6")
+PKTGEN(PROG_TYPE, "tc_redirect_host_ipv6")
 int tc_redirect_host_ipv6_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
 
 	pktgen__init(&builder, ctx);
 
-	BUF_DECL(REDIRECT_HOST_IPV6_PRE, tc_redirect_host_ipv6_pre);
-	BUILDER_PUSH_BUF(builder, REDIRECT_HOST_IPV6_PRE);
+	scapy_push_data(&builder, tc_redirect_host_ipv6_pre,
+			sizeof(tc_redirect_host_ipv6_pre));
 
 	pktgen__finish(&builder);
 
@@ -257,7 +319,7 @@ int tc_redirect_host_ipv6_pktgen(struct __ctx_buff *ctx)
 /* Test that sending a packet from the host into a Pod is correctly forwarded via
  * the appropriate bpf redirect helper.
  */
-SETUP("tc", "tc_redirect_host_ipv6")
+SETUP(PROG_TYPE, "tc_redirect_host_ipv6")
 int tc_redirect_host_ipv6_setup(struct __ctx_buff *ctx)
 {
 	const union v6addr pod_ip = { .addr = v6_pod_one_addr };
@@ -273,24 +335,30 @@ int tc_redirect_host_ipv6_setup(struct __ctx_buff *ctx)
 	/* Add source identity to test mark */
 	ipcache_v6_add_entry(&ext_ip, 0, TEST_SRC_IDENTITY, 0, 0);
 
+	clear_records();
 	return host_send_packet(ctx);
 }
 
-CHECK("tc", "tc_redirect_host_ipv6")
+CHECK(PROG_TYPE, "tc_redirect_host_ipv6")
 int tc_redirect_host_ipv6_check(__maybe_unused const struct __ctx_buff *ctx)
 {
-#ifdef __CONFIG_ENABLE_NETKIT
-	const unsigned int expected[RECORD__MAX] = {1, 1, 0};
-#elif defined(USE_BPF_PROG_FOR_INGRESS_POLICY)
+#ifdef __CONFIG_ENABLE_ENDPOINT_ROUTES
+	/* See tc_redirect_host_ipv4_check: enforce-at-source on both drivers,
+	 * single plain redirect(), no policy tail-call. Regression guard for
+	 * netkit double policy enforcement (210b5866e0).
+	 */
 	const unsigned int expected[RECORD__MAX] = {0, 1, 0};
 #else
 	const unsigned int expected[RECORD__MAX] = {1, 1, 0};
 #endif
+	const union v6addr pod_ip = { .addr = v6_pod_one_addr };
 	void *data;
 	void *data_end;
 	__u32 *status_code;
 
 	test_init();
+
+	endpoint_v6_del_entry(&pod_ip);
 
 	data = (void *)(long)ctx->data;
 	data_end = (void *)(long)ctx->data_end;
@@ -320,11 +388,10 @@ int tc_redirect_host_ipv6_check(__maybe_unused const struct __ctx_buff *ctx)
 		test_fatal(TEST_DRIVER_NAME ": Incorrect nunmber of bpf_redirect_peer() calls")
 
 	/* Check the packet. */
-	BUF_DECL(REDIRECT_HOST_IPV6_POST, tc_redirect_host_ipv6_post);
 	ASSERT_CTX_BUF_OFF("tc_redirect_host_ipv6_post",
 			   "Ether", ctx, sizeof(__u32),
-			   REDIRECT_HOST_IPV6_POST,
-			   sizeof(BUF(REDIRECT_HOST_IPV6_POST)));
+			   tc_redirect_host_ipv6_post,
+			   sizeof(tc_redirect_host_ipv6_post));
 
 	test_finish();
 }

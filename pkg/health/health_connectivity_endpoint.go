@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,7 +23,6 @@ import (
 	"github.com/cilium/cilium/pkg/datapath/linux/route"
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	endpointcreator "github.com/cilium/cilium/pkg/endpoint/creator"
 	"github.com/cilium/cilium/pkg/endpointmanager"
@@ -32,6 +32,7 @@ import (
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/mtu"
 	"github.com/cilium/cilium/pkg/netns"
@@ -96,7 +97,7 @@ func (h *ciliumHealthManager) getNodeRouterAddressing(ctx context.Context) (*mod
 	nodeRouterAddressing := &models.NodeAddressing{}
 
 	if h.daemonConfig.EnableIPv6 {
-		nodeRouterAddressing.IPV6 = &models.NodeAddressingElement{
+		nodeRouterAddressing.IPv6 = &models.NodeAddressingElement{
 			Enabled:    h.daemonConfig.EnableIPv6,
 			IP:         ln.GetCiliumInternalIP(true).String(),
 			AllocRange: ln.IPv6AllocCIDR.String(),
@@ -104,7 +105,7 @@ func (h *ciliumHealthManager) getNodeRouterAddressing(ctx context.Context) (*mod
 	}
 
 	if h.daemonConfig.EnableIPv4 {
-		nodeRouterAddressing.IPV4 = &models.NodeAddressingElement{
+		nodeRouterAddressing.IPv4 = &models.NodeAddressingElement{
 			Enabled:    h.daemonConfig.EnableIPv4,
 			IP:         ln.GetCiliumInternalIP(false).String(),
 			AllocRange: ln.IPv4AllocCIDR.String(),
@@ -243,14 +244,13 @@ func (h *ciliumHealthManager) cleanupEndpoint() {
 //
 // cleanupEndpoint() must be called before calling launchAsEndpoint() to ensure
 // cleanup of prior cilium-health endpoint instances.
-func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpointCreator endpointcreator.EndpointCreator, endpointManager endpointmanager.EndpointsModify, mtuConfig mtu.MTU, bigTCPConfig *bigtcp.Configuration, sysctl sysctl.Sysctl) (*Client, error) {
+func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpointCreator endpointcreator.EndpointCreator, endpointManager endpointmanager.EndpointsModify, mtuConfig mtu.MTU, bigTCPConfig bigtcp.Config, sysctl sysctl.Sysctl) (*Client, error) {
 	var (
 		info = &models.EndpointChangeRequest{
-			ContainerName: ciliumHealth,
-			State:         models.EndpointStateWaitingDashForDashIdentity.Pointer(),
-			Addressing:    &models.AddressPair{},
+			State:      models.EndpointStateWaitingDashForDashIdentity.Pointer(),
+			Addressing: &models.AddressPair{},
 		}
-		healthIP               net.IP
+		healthIP               netip.Addr
 		ip4Address, ip6Address *net.IPNet
 	)
 
@@ -259,17 +259,19 @@ func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpoint
 		return nil, fmt.Errorf("failed to get local node: %w", err)
 	}
 
-	if healthIPv6 := ln.IPv6HealthIP; healthIPv6 != nil {
-		info.Addressing.IPV6 = healthIPv6.String()
-		info.Addressing.IPV6PoolName = ipam.PoolDefault().String()
-		ip6Address = &net.IPNet{IP: healthIPv6, Mask: defaults.ContainerIPv6Mask}
-		healthIP = healthIPv6
+	if healthIPv6 := ln.IPv6HealthIP; healthIPv6.IsValid() {
+		info.Addressing.IPv6 = healthIPv6.String()
+		info.Addressing.IPv6PoolName = ipam.PoolDefault().String()
+		ip6Address = &net.IPNet{IP: healthIPv6.AsSlice(), Mask: defaults.ContainerIPv6Mask}
+		healthIP = healthIPv6.Addr
 	}
-	if healthIPv4 := ln.IPv4HealthIP; healthIPv4 != nil {
-		info.Addressing.IPV4 = healthIPv4.String()
-		info.Addressing.IPV4PoolName = ipam.PoolDefault().String()
-		ip4Address = &net.IPNet{IP: healthIPv4, Mask: defaults.ContainerIPv4Mask}
-		healthIP = healthIPv4
+	if healthIPv4 := ln.IPv4HealthIP; healthIPv4.IsValid() {
+		info.Addressing.IPv4 = healthIPv4.String()
+		info.Addressing.IPv4PoolName = ipam.PoolDefault().String()
+		ip4Address = &net.IPNet{IP: healthIPv4.AsSlice(), Mask: defaults.ContainerIPv4Mask}
+		if !option.Config.PreferIpv6 {
+			healthIP = healthIPv4.Addr
+		}
 	}
 
 	if option.Config.EnableEndpointRoutes {
@@ -287,7 +289,7 @@ func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpoint
 		return nil, fmt.Errorf("create cilium-health netns: %w", err)
 	}
 
-	linkConfig := datapath.LinkConfig{
+	linkConfig := connector.LinkConfig{
 		HostIfName:     healthName,
 		PeerIfName:     epIfaceName,
 		PeerNamespace:  ns,
@@ -306,8 +308,16 @@ func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpoint
 	hostLinkAttrs := linkPair.GetHostLink().Attrs()
 	peerLinkAttrs := linkPair.GetPeerLink().Attrs()
 
-	info.Mac = peerLinkAttrs.HardwareAddr.String()
-	info.HostMac = hostLinkAttrs.HardwareAddr.String()
+	// L3 devices, such as netkit in its default mode, have no link-layer
+	// address to report.
+	if linkPair.GetMode().IsLayer2() {
+		if info.Mac, err = mac.FromHardwareAddr(peerLinkAttrs.HardwareAddr); err != nil {
+			return nil, fmt.Errorf("invalid MAC address for %s: %w", peerLinkAttrs.Name, err)
+		}
+		if info.HostMac, err = mac.FromHardwareAddr(hostLinkAttrs.HardwareAddr); err != nil {
+			return nil, fmt.Errorf("invalid MAC address for %s: %w", hostLinkAttrs.Name, err)
+		}
+	}
 	info.InterfaceIndex = int64(hostLinkAttrs.Index)
 	info.InterfaceName = hostLinkAttrs.Name
 
@@ -366,7 +376,7 @@ func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpoint
 	// Set up the endpoint routes.
 	routes, err := h.getHealthRoutes(baseCtx, mtuConfig)
 	if err != nil {
-		return nil, fmt.Errorf("Error while getting routes for containername %q: %w", info.ContainerName, err)
+		return nil, fmt.Errorf("Error while getting routes for %s endpoint: %w", ciliumHealth, err)
 	}
 
 	err = ns.Do(func() error {
@@ -377,11 +387,13 @@ func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpoint
 	}
 
 	if option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
-		ri := h.infraIPAllocator.GetHealthEndpointRouting()
+		ri, riv6 := h.infraIPAllocator.GetHealthEndpointRouting()
+		if healthIP.Is6() {
+			ri = riv6
+		}
 		if ri == nil {
 			return nil, errors.New("failed to configure health endpoint routing - no IP allocated")
 		}
-		// ENI mode does not support IPv6.
 		if err := ri.Configure(
 			healthIP,
 			mtuConfig.GetDeviceMTU(),
@@ -401,7 +413,7 @@ func (h *ciliumHealthManager) launchAsEndpoint(baseCtx context.Context, endpoint
 	ep.UpdateLabels(ctx, labels.LabelSourceAny, labels.LabelHealth, nil, true)
 
 	// Initialize the health client to talk to this instance.
-	client := &Client{host: "http://" + net.JoinHostPort(healthIP.String(), strconv.Itoa(option.Config.ClusterHealthPort))}
+	client := &Client{host: "http://" + netip.AddrPortFrom(healthIP, uint16(option.Config.ClusterHealthPort)).String()}
 	metrics.SubprocessStart.WithLabelValues(ciliumHealth).Inc()
 
 	return client, nil

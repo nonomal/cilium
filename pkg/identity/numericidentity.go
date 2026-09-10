@@ -10,12 +10,14 @@ import (
 	"net/netip"
 	"sort"
 	"strconv"
-	"sync"
 	"unsafe"
 
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
+	"github.com/cilium/cilium/pkg/identity/numericidentity"
 	api "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -37,11 +39,11 @@ const (
 
 	// IdentityScopeLocal is the tag in the numeric identity that identifies
 	// a numeric identity to have local (CIDR) scope.
-	IdentityScopeLocal = NumericIdentity(1 << 24)
+	IdentityScopeLocal = NumericIdentity(1 << numericidentity.Bitlength)
 
 	// IdentityScopeRemoteNode is the tag in the numeric identity that identifies
 	// an identity to be a remote in-cluster node.
-	IdentityScopeRemoteNode = NumericIdentity(2 << 24)
+	IdentityScopeRemoteNode = NumericIdentity(2 << numericidentity.Bitlength)
 
 	// MinAllocatorLocalIdentity represents the minimal numeric identity
 	// that the localIdentityCache allocator can allocate for a local (CIDR)
@@ -49,7 +51,7 @@ const (
 	//
 	// Note that this does not represents the minimal value for a local
 	// identity, as the allocated ID will then be bitwise OR'ed with
-	// LocalIdentityFlag.
+	// IdentityScopeLocal.
 	MinAllocatorLocalIdentity = 1
 
 	// MinLocalIdentity represents the actual minimal numeric identity value
@@ -62,7 +64,7 @@ const (
 	//
 	// Note that this does not represents the maximal value for a local
 	// identity, as the allocated ID will then be bitwise OR'ed with
-	// LocalIdentityFlag.
+	// IdentityScopeLocal.
 	MaxAllocatorLocalIdentity = 0xFFFFFF
 
 	// MaxLocalIdentity represents the actual maximal numeric identity value
@@ -71,7 +73,7 @@ const (
 
 	// MinimalNumericIdentity represents the minimal numeric identity not
 	// used for reserved purposes.
-	MinimalNumericIdentity = NumericIdentity(256)
+	MinimalNumericIdentity = NumericIdentity(numericidentity.MinimalIdentity)
 
 	// UserReservedNumericIdentity represents the minimal numeric identity that
 	// can be used by users for reserved purposes.
@@ -82,63 +84,54 @@ const (
 	InvalidIdentity = NumericIdentity(0)
 )
 
-var (
-	// clusterIDInit ensures that clusterIDBits and clusterIDShift can only be
-	// set once, and only if we haven't used either value elsewhere already.
-	clusterIDInit sync.Once
-
-	// clusterIDBits is the number of bits that represent a cluster ID in a
-	// numeric identity
-	clusterIDBits uint32
-
-	// clusterIDShift is the number of bits to shift a cluster ID in a numeric
-	// identity and is equal to the number of bits that represent a cluster-local identity.
-	clusterIDShift uint32
-)
-
 const (
 	// IdentityUnknown represents an unknown identity
-	IdentityUnknown NumericIdentity = iota
+	IdentityUnknown = NumericIdentity(datapath.IdentityUnknownID)
 
 	// ReservedIdentityHost represents the local host
-	ReservedIdentityHost
+	ReservedIdentityHost = NumericIdentity(datapath.IdentityHostID)
 
 	// ReservedIdentityWorld represents any endpoint outside of the cluster
-	ReservedIdentityWorld
+	ReservedIdentityWorld = NumericIdentity(datapath.IdentityWorldID)
 
 	// ReservedIdentityUnmanaged represents unmanaged endpoints.
-	ReservedIdentityUnmanaged
+	ReservedIdentityUnmanaged = NumericIdentity(datapath.IdentityUnmanagedID)
 
 	// ReservedIdentityHealth represents the local cilium-health endpoint
-	ReservedIdentityHealth
+	ReservedIdentityHealth = NumericIdentity(datapath.IdentityHealthID)
 
 	// ReservedIdentityInit is the identity given to endpoints that have not
 	// received any labels yet.
-	ReservedIdentityInit
+	ReservedIdentityInit = NumericIdentity(datapath.IdentityInitID)
 
 	// ReservedIdentityRemoteNode is the identity given to all nodes in
 	// local and remote clusters except for the local node.
-	ReservedIdentityRemoteNode
+	ReservedIdentityRemoteNode = NumericIdentity(datapath.IdentityRemoteNodeID)
 
 	// ReservedIdentityKubeAPIServer is the identity given to remote node(s) which
 	// have backend(s) serving the kube-apiserver running.
-	ReservedIdentityKubeAPIServer
+	ReservedIdentityKubeAPIServer = NumericIdentity(datapath.IdentityKubeAPIServerNodeID)
 
 	// ReservedIdentityIngress is the identity given to the IP used as the source
 	// address for connections from Ingress proxies.
-	ReservedIdentityIngress
+	ReservedIdentityIngress = NumericIdentity(datapath.IdentityIngressID)
 
 	// ReservedIdentityWorldIPv4 represents any endpoint outside of the cluster
 	// for IPv4 address only.
-	ReservedIdentityWorldIPv4
+	ReservedIdentityWorldIPv4 = NumericIdentity(datapath.IdentityWorldIPv4ID)
 
 	// ReservedIdentityWorldIPv6 represents any endpoint outside of the cluster
 	// for IPv6 address only.
-	ReservedIdentityWorldIPv6
+	ReservedIdentityWorldIPv6 = NumericIdentity(datapath.IdentityWorldIPv6ID)
 
-	// ReservedEncryptedOverlay represents overlay traffic which must be IPSec
-	// encrypted before it leaves the host
-	ReservedEncryptedOverlay
+	// The aggregate reserved identities are used for policy map aggregation.
+	// They are not applied to traffic directly. For more information, see
+	// pkg/policy/aggregate.go
+
+	ReservedIdentityAggregateCluster     = NumericIdentity(datapath.IdentityAggregateClusterID)
+	ReservedIdentityAggregateClusterMesh = NumericIdentity(datapath.IdentityAggregateClusterMeshID)
+	ReservedIdentityAggregateWorld       = NumericIdentity(datapath.IdentityAggregateWorldID)
+	ReservedIdentityAggregateRemoteNode  = NumericIdentity(datapath.IdentityAggregateRemoteNodeID)
 )
 
 // Special identities for well-known cluster components
@@ -188,13 +181,21 @@ type wellKnownIdentity struct {
 	labelArray labels.LabelArray
 }
 
+// wellKnownMU protects the wellKnownIdentities map. InitWellKnownIdentities can
+// run concurrently with readers (e.g. multiple agent instances in tests), so the
+// map needs synchronization of its own.
+var wellKnownMU lock.RWMutex
+
 func (w wellKnownIdentities) add(i NumericIdentity, lbls []string) {
 	labelMap := labels.NewLabelsFromModel(lbls)
 	identity := NewIdentity(i, labelMap)
+
+	wellKnownMU.Lock()
 	w[i] = wellKnownIdentity{
 		identity:   NewIdentity(i, labelMap),
 		labelArray: labelMap.LabelArray(),
 	}
+	wellKnownMU.Unlock()
 
 	cacheMU.Lock()
 	reservedIdentityCache[i] = identity
@@ -202,6 +203,8 @@ func (w wellKnownIdentities) add(i NumericIdentity, lbls []string) {
 }
 
 func (w wellKnownIdentities) LookupByLabels(lbls labels.Labels) *Identity {
+	wellKnownMU.RLock()
+	defer wellKnownMU.RUnlock()
 	for _, i := range w {
 		if lbls.Equals(i.identity.Labels) {
 			return i.identity
@@ -212,12 +215,16 @@ func (w wellKnownIdentities) LookupByLabels(lbls labels.Labels) *Identity {
 }
 
 func (w wellKnownIdentities) ForEach(yield func(*Identity)) {
+	wellKnownMU.RLock()
+	defer wellKnownMU.RUnlock()
 	for _, id := range w {
 		yield(id.identity)
 	}
 }
 
 func (w wellKnownIdentities) lookupByNumericIdentity(identity NumericIdentity) *Identity {
+	wellKnownMU.RLock()
+	defer wellKnownMU.RUnlock()
 	wki, ok := w[identity]
 	if !ok {
 		return nil
@@ -225,17 +232,13 @@ func (w wellKnownIdentities) lookupByNumericIdentity(identity NumericIdentity) *
 	return wki.identity
 }
 
-type Configuration interface {
-	CiliumNamespaceName() string
-}
-
 func k8sLabel(key string, value string) string {
 	return "k8s:" + key + "=" + value
 }
 
-// InitWellKnownIdentities establishes all well-known identities. Returns the
-// number of well-known identities initialized.
-func InitWellKnownIdentities(c Configuration, cinfo cmtypes.ClusterInfo) int {
+// InitWellKnownIdentities establishes all well-known and static identities. Returns the
+// number of well-known (but not reserved) identities initialized.
+func InitWellKnownIdentities(ciliumNS string, cinfo cmtypes.ClusterInfo) int {
 	// kube-dns labels
 	//   k8s:io.cilium.k8s.policy.serviceaccount=kube-dns
 	//   k8s:io.kubernetes.pod.namespace=kube-system
@@ -313,71 +316,34 @@ func InitWellKnownIdentities(c Configuration, cinfo cmtypes.ClusterInfo) int {
 		"k8s:io.cilium/app=operator",
 		"k8s:app.kubernetes.io/part-of=cilium",
 		"k8s:app.kubernetes.io/name=cilium-operator",
-		k8sLabel(api.PodNamespaceLabel, c.CiliumNamespaceName()),
+		k8sLabel(api.PodNamespaceLabel, ciliumNS),
 		k8sLabel(api.PolicyLabelServiceAccount, "cilium-operator"),
 		k8sLabel(api.PolicyLabelCluster, cinfo.Name),
 	}
 	WellKnown.add(ReservedCiliumOperator, ciliumOperatorLabels)
 	WellKnown.add(ReservedCiliumOperator2, append(ciliumOperatorLabels,
-		k8sLabel(api.PodNamespaceMetaNameLabel, c.CiliumNamespaceName())))
+		k8sLabel(api.PodNamespaceMetaNameLabel, ciliumNS)))
 
 	return len(WellKnown)
 }
 
-// GetClusterIDShift returns the number of bits to shift a cluster ID in a numeric
-// identity and is equal to the number of bits that represent a cluster-local identity.
-// A sync.Once is used to ensure we only initialize clusterIDShift once.
-func GetClusterIDShift() uint32 {
-	clusterIDInit.Do(initClusterIDShift)
-	return clusterIDShift
-}
-
-// GetClusterIDBits returns the number of bits that represent a cluster ID in a numeric identity
-// A sync.Once is used to ensure we only initialize clusterIDBits once.
-func GetClusterIDBits() uint32 {
-	clusterIDInit.Do(initClusterIDShift)
-	return clusterIDBits
-}
-
-// initClusterIDShift sets variables that control the bit allocation of cluster
-// ID in a numeric identity.
-func initClusterIDShift() {
-	// ClusterIDLen is the number of bits that represent a cluster ID in a numeric identity
-	clusterIDBits = uint32(math.Log2(float64(cmtypes.ClusterIDMax + 1)))
-	// ClusterIDShift is the number of bits to shift a cluster ID in a numeric identity
-	clusterIDShift = NumericIdentityBitlength - clusterIDBits
-}
-
-// GetMinimalNumericIdentity returns the minimal numeric identity not used for
-// reserved purposes.
-func GetMinimalAllocationIdentity(clusterID uint32) NumericIdentity {
-	if clusterID > 0 {
-		// For ClusterID > 0, the identity range just starts from cluster shift,
-		// no well-known-identities need to be reserved from the range.
-		return NumericIdentity((1 << GetClusterIDShift()) * clusterID)
-	}
-	return MinimalNumericIdentity
-}
-
-// GetMaximumAllocationIdentity returns the maximum numeric identity that
-// should be handed out by the identity allocator.
-func GetMaximumAllocationIdentity(clusterID uint32) NumericIdentity {
-	return NumericIdentity((1<<GetClusterIDShift())*(clusterID+1) - 1)
-}
-
 var (
 	reservedIdentities = map[string]NumericIdentity{
-		labels.IDNameHost:             ReservedIdentityHost,
-		labels.IDNameWorld:            ReservedIdentityWorld,
-		labels.IDNameWorldIPv4:        ReservedIdentityWorldIPv4,
-		labels.IDNameWorldIPv6:        ReservedIdentityWorldIPv6,
-		labels.IDNameUnmanaged:        ReservedIdentityUnmanaged,
-		labels.IDNameHealth:           ReservedIdentityHealth,
-		labels.IDNameInit:             ReservedIdentityInit,
-		labels.IDNameRemoteNode:       ReservedIdentityRemoteNode,
-		labels.IDNameKubeAPIServer:    ReservedIdentityKubeAPIServer,
-		labels.IDNameIngress:          ReservedIdentityIngress,
-		labels.IDNameEncryptedOverlay: ReservedEncryptedOverlay,
+		labels.IDNameHost:          ReservedIdentityHost,
+		labels.IDNameWorld:         ReservedIdentityWorld,
+		labels.IDNameWorldIPv4:     ReservedIdentityWorldIPv4,
+		labels.IDNameWorldIPv6:     ReservedIdentityWorldIPv6,
+		labels.IDNameUnmanaged:     ReservedIdentityUnmanaged,
+		labels.IDNameHealth:        ReservedIdentityHealth,
+		labels.IDNameInit:          ReservedIdentityInit,
+		labels.IDNameRemoteNode:    ReservedIdentityRemoteNode,
+		labels.IDNameKubeAPIServer: ReservedIdentityKubeAPIServer,
+		labels.IDNameIngress:       ReservedIdentityIngress,
+
+		labels.IDNameAggregateCluster:     ReservedIdentityAggregateCluster,
+		labels.IDNameAggregateClusterMesh: ReservedIdentityAggregateClusterMesh,
+		labels.IDNameAggregateWorld:       ReservedIdentityAggregateWorld,
+		labels.IDNameAggregateRemoteNode:  ReservedIdentityAggregateRemoteNode,
 	}
 	reservedIdentityNames = map[NumericIdentity]string{
 		IdentityUnknown:               "unknown",
@@ -391,6 +357,11 @@ var (
 		ReservedIdentityRemoteNode:    labels.IDNameRemoteNode,
 		ReservedIdentityKubeAPIServer: labels.IDNameKubeAPIServer,
 		ReservedIdentityIngress:       labels.IDNameIngress,
+
+		ReservedIdentityAggregateCluster:     labels.IDNameAggregateCluster,
+		ReservedIdentityAggregateClusterMesh: labels.IDNameAggregateClusterMesh,
+		ReservedIdentityAggregateWorld:       labels.IDNameAggregateWorld,
+		ReservedIdentityAggregateRemoteNode:  labels.IDNameAggregateRemoteNode,
 	}
 	reservedIdentityLabels = map[NumericIdentity]labels.Labels{
 		ReservedIdentityHost:       labels.LabelHost,
@@ -406,6 +377,11 @@ var (
 			labels.LabelRemoteNode.String():    "",
 		}, ""),
 		ReservedIdentityIngress: labels.LabelIngress,
+
+		ReservedIdentityAggregateCluster:     labels.LabelsAggregateCluster,
+		ReservedIdentityAggregateClusterMesh: labels.LabelsAggregateClusterMesh,
+		ReservedIdentityAggregateWorld:       labels.LabelsAggregateWorld,
+		ReservedIdentityAggregateRemoteNode:  labels.LabelsAggregateRemoteNode,
 	}
 
 	// WellKnown identities stores global state of all well-known identities.
@@ -439,16 +415,19 @@ func AddUserDefinedNumericIdentity(identity NumericIdentity, label string) error
 
 // NumericIdentity is the numeric representation of a security identity.
 //
-// Bits:
+// Bits 24-31 encode the identity scope, as defined by the IdentityScope*
+// constants. For allocated global identities,
+// bits 0-23 are divided between the cluster-local identity and cluster ID.
+// The boundary depends on the configured maximum number of clusters:
 //
-//	 0-15: identity identifier
-//	16-23: cluster identifier
-//	   24: LocalIdentityFlag: Indicates that the identity has a local scope
+//	max-connected-clusters=255: bits 0-15 identity, bits 16-23 cluster ID
+//	max-connected-clusters=511: bits 0-14 identity, bits 15-23 cluster ID
+//
+// Reserved identities also have global scope, but use fixed values below
+// MinimalNumericIdentity and do not follow this subdivision.
+//
+// For non-global scopes, bits 0-23 contain the scope-local identifier.
 type NumericIdentity uint32
-
-// NumericIdentityBitlength is the number of bits used on the wire for a
-// NumericIdentity
-const NumericIdentityBitlength = 24
 
 // MaxNumericIdentity is the maximum value of a NumericIdentity.
 const MaxNumericIdentity = math.MaxUint32
@@ -505,9 +484,10 @@ func (id NumericIdentity) IsReservedIdentity() bool {
 	return isReservedIdentity
 }
 
-// ClusterID returns the cluster ID associated with the identity
-func (id NumericIdentity) ClusterID() uint32 {
-	return (uint32(id) >> uint32(GetClusterIDShift())) & cmtypes.ClusterIDMax
+// ClusterID returns the cluster ID associated with the identity for the given
+// cluster configuration.
+func (id NumericIdentity) ClusterID(cinfo cmtypes.ClusterInfo) uint32 {
+	return (uint32(id) >> cinfo.GetClusterIDShift()) & cinfo.MaxConnectedClusters
 }
 
 // GetAllReservedIdentities returns a list of all reserved numeric identities

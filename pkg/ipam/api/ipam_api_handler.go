@@ -7,8 +7,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	"github.com/go-openapi/runtime/middleware"
@@ -19,9 +19,11 @@ import (
 	"github.com/cilium/cilium/pkg/api"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/endpointmanager"
+	iputil "github.com/cilium/cilium/pkg/ip"
 	"github.com/cilium/cilium/pkg/ipam"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
+	cslices "github.com/cilium/cilium/pkg/slices"
 	"github.com/cilium/cilium/pkg/time"
 )
 
@@ -65,13 +67,13 @@ func (r *IpamPostIpamHandler) Handle(params ipamapi.PostIpamParams) middleware.R
 	}
 
 	if ipv4Result != nil {
-		resp.Address.IPV4 = ipv4Result.IP.String()
-		resp.Address.IPV4PoolName = ipv4Result.IPPoolName.String()
-		resp.IPV4 = &models.IPAMAddressResponse{
-			Cidrs:           ipv4Result.CIDRs,
-			IP:              ipv4Result.IP.String(),
+		resp.Address.IPv4 = ipv4Result.IP.String()
+		resp.Address.IPv4PoolName = ipv4Result.IPPoolName.String()
+		resp.IPv4 = &models.IPAMAddressResponse{
+			Cidrs:           cslices.Map(ipv4Result.CIDRs, iputil.PrefixFrom),
+			IP:              iputil.AddrFrom(ipv4Result.IP),
 			MasterMac:       ipv4Result.PrimaryMAC,
-			Gateway:         ipv4Result.GatewayIP,
+			Gateway:         iputil.AddrFrom(ipv4Result.GatewayIP),
 			ExpirationUUID:  ipv4Result.ExpirationUUID,
 			InterfaceNumber: ipv4Result.InterfaceNumber,
 			SkipMasquerade:  ipv4Result.SkipMasquerade,
@@ -79,13 +81,13 @@ func (r *IpamPostIpamHandler) Handle(params ipamapi.PostIpamParams) middleware.R
 	}
 
 	if ipv6Result != nil {
-		resp.Address.IPV6 = ipv6Result.IP.String()
-		resp.Address.IPV6PoolName = ipv6Result.IPPoolName.String()
-		resp.IPV6 = &models.IPAMAddressResponse{
-			Cidrs:           ipv6Result.CIDRs,
-			IP:              ipv6Result.IP.String(),
+		resp.Address.IPv6 = ipv6Result.IP.String()
+		resp.Address.IPv6PoolName = ipv6Result.IPPoolName.String()
+		resp.IPv6 = &models.IPAMAddressResponse{
+			Cidrs:           cslices.Map(ipv6Result.CIDRs, iputil.PrefixFrom),
+			IP:              iputil.AddrFrom(ipv6Result.IP),
 			MasterMac:       ipv6Result.PrimaryMAC,
-			Gateway:         ipv6Result.GatewayIP,
+			Gateway:         iputil.AddrFrom(ipv6Result.GatewayIP),
 			ExpirationUUID:  ipv6Result.ExpirationUUID,
 			InterfaceNumber: ipv6Result.InterfaceNumber,
 			SkipMasquerade:  ipv6Result.SkipMasquerade,
@@ -104,7 +106,7 @@ func (r *IpamPostIpamHandler) getNodeRouterAddressing(ctx context.Context) (*mod
 	nodeRouterAddressing := &models.NodeAddressing{}
 
 	if r.DaemonConfig.EnableIPv6 {
-		nodeRouterAddressing.IPV6 = &models.NodeAddressingElement{
+		nodeRouterAddressing.IPv6 = &models.NodeAddressingElement{
 			Enabled:    r.DaemonConfig.EnableIPv6,
 			IP:         ln.GetCiliumInternalIP(true).String(),
 			AllocRange: ln.IPv6AllocCIDR.String(),
@@ -112,7 +114,7 @@ func (r *IpamPostIpamHandler) getNodeRouterAddressing(ctx context.Context) (*mod
 	}
 
 	if r.DaemonConfig.EnableIPv4 {
-		nodeRouterAddressing.IPV4 = &models.NodeAddressingElement{
+		nodeRouterAddressing.IPv4 = &models.NodeAddressingElement{
 			Enabled:    r.DaemonConfig.EnableIPv4,
 			IP:         ln.GetCiliumInternalIP(false).String(),
 			AllocRange: ln.IPv4AllocCIDR.String(),
@@ -122,7 +124,7 @@ func (r *IpamPostIpamHandler) getNodeRouterAddressing(ctx context.Context) (*mod
 	return nodeRouterAddressing, nil
 }
 
-// Handle incoming requests address allocation requests for the daemon.
+// Handle incoming address allocation requests for the daemon.
 func (r *IpamPostIpamIPHandler) Handle(params ipamapi.PostIpamIPParams) middleware.Responder {
 	owner := swag.StringValue(params.Owner)
 	pool := ipam.Pool(swag.StringValue(params.Pool))
@@ -142,9 +144,9 @@ func (r *IpamDeleteIpamIPHandler) Handle(params ipamapi.DeleteIpamIPParams) midd
 		return api.Error(ipamapi.DeleteIpamIPFailureCode, fmt.Errorf("IP is in use by endpoint %d", ep.ID))
 	}
 
-	ip := net.ParseIP(params.IP)
-	if ip == nil {
-		return api.Error(ipamapi.DeleteIpamIPInvalidCode, fmt.Errorf("Invalid IP address: %s", params.IP))
+	ip, err := netip.ParseAddr(params.IP)
+	if err != nil {
+		return api.Error(ipamapi.DeleteIpamIPInvalidCode, fmt.Errorf("Invalid IP address %s: %w", params.IP, err))
 	}
 
 	pool := ipam.Pool(swag.StringValue(params.Pool))

@@ -14,6 +14,7 @@ metadata:
     name: cilium-operator
     app.kubernetes.io/part-of: cilium
     app.kubernetes.io/name: cilium-operator
+    helm.sh/chart: {{ include "cilium.chart" . }}
     {{- with .Values.commonLabels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
@@ -49,8 +50,9 @@ spec:
         cilium.io/cilium-configmap-checksum: {{ include (print $.Template.BasePath "/cilium-configmap.yaml") . | sha256sum | quote }}
         {{- end }}
         {{- if and .Values.operator.prometheus.enabled (not .Values.operator.prometheus.serviceMonitor.enabled) }}
-        prometheus.io/port: {{ .Values.operator.prometheus.port | quote }}
-        prometheus.io/scrape: "true"
+        {{- with include "cilium.prometheusAnnotations" (list .Values.operator.prometheus.port .Values.operator.podAnnotations) }}
+        {{- . | nindent 8 }}
+        {{- end }}
         {{- end }}
         {{- with .Values.operator.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -60,6 +62,7 @@ spec:
         name: cilium-operator
         app.kubernetes.io/part-of: cilium
         app.kubernetes.io/name: cilium-operator
+        helm.sh/chart: {{ include "cilium.chart" . }}
         {{- with .Values.commonLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -74,6 +77,10 @@ spec:
       {{- with .Values.operator.podSecurityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.operator.extraInitContainers }}
+      initContainers:
+      {{- toYaml .Values.operator.extraInitContainers | nindent 6 }}
       {{- end }}
       containers:
       - name: cilium-operator
@@ -189,7 +196,9 @@ spec:
         ports:
         - name: health
           containerPort: 9234
+        {{- if .Values.operator.hostNetwork }}
           hostPort: 9234
+        {{- end }}
         {{- if .Values.operator.prometheus.enabled }}
         - name: prometheus
           containerPort: {{ .Values.operator.prometheus.port }}
@@ -236,9 +245,11 @@ spec:
         {{- end }}
         {{- end }}
         {{- if or .Values.clustermesh.enableEndpointSliceSynchronization .Values.clustermesh.mcsapi.enabled }}
+        {{- if not .Values.clustermesh.apiserver.tls.disableDefaultVolumes }}
         - name: clustermesh-secrets
           mountPath: /var/lib/cilium/clustermesh
           readOnly: true
+        {{- end }}
         {{- end }}
         {{- if .Values.kubeConfigPath }}
         - name: kube-config
@@ -310,16 +321,6 @@ spec:
       nodeSelector:
         {{- toYaml . | trim | nindent 8 }}
       {{- end }}
-      {{/* TODO: remove hostAliases for the v1.21 release as this is now handled via a static dialer to avoid pod restart */}}
-      {{- if and (or .Values.clustermesh.enableEndpointSliceSynchronization .Values.clustermesh.mcsapi.enabled) .Values.clustermesh.config.enabled (not (and .Values.clustermesh.useAPIServer .Values.clustermesh.apiserver.kvstoremesh.enabled )) (not .Values.clustermesh.disableKubernetesHostAliases) }}
-      hostAliases:
-      {{- range $_, $cluster := (include "clustermesh-clusters" . | fromJson) }}
-      {{- range $ip := $cluster.ips }}
-      - ip: {{ $ip }}
-        hostnames: [ "{{ $cluster.name }}.{{ $.Values.clustermesh.config.domain }}" ]
-      {{- end }}
-      {{- end }}
-      {{- end }}
       {{- if or (.Values.operator.tolerations) (hasKey .Values "agentNotReadyTaintKey") }}
       tolerations:
       {{- with .Values.operator.tolerations }}
@@ -379,7 +380,8 @@ spec:
       {{- toYaml . | nindent 6 }}
       {{- end }}
       {{- if or .Values.clustermesh.enableEndpointSliceSynchronization .Values.clustermesh.mcsapi.enabled }}
-        # To read the clustermesh configuration
+        # To read the clustermesh configuration and TLS certificates
+      {{- if not .Values.clustermesh.apiserver.tls.disableDefaultVolumes }}
       - name: clustermesh-secrets
         projected:
           # note: the leading zero means this number is in octal representation: do not remove it
@@ -434,6 +436,7 @@ spec:
               - key: {{ .Values.tls.caBundle.key }}
                 path: local-etcd-client-ca.crt
           {{- end }}
+      {{- end }}
       {{- end }}
       {{- if and .Values.operator.prometheus.enabled .Values.operator.prometheus.tls.enabled }}
       # To read the prometheus configuration

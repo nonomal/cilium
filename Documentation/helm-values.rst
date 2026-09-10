@@ -111,7 +111,7 @@
    * - :spelling:ignore:`authentication.mutual.spire.install.agent.image`
      - SPIRE agent image
      - object
-     - ``{"digest":"sha256:7bb8469af28f00908a96a8a51fb36cbbcdfb85efe78e94b492f949f33284bf4d","override":null,"pullPolicy":"Always","repository":"ghcr.io/spiffe/spire-agent","tag":"1.14.1","useDigest":true}``
+     - ``{"digest":"sha256:41b0dcd8b258a69db9e2768292a060766fb76fd866e4bc925849981ea1b825ff","override":null,"pullPolicy":"Always","repository":"ghcr.io/spiffe/spire-agent","tag":"1.15.3","useDigest":true}``
    * - :spelling:ignore:`authentication.mutual.spire.install.agent.labels`
      - SPIRE agent labels
      - object
@@ -159,7 +159,7 @@
    * - :spelling:ignore:`authentication.mutual.spire.install.initImage`
      - init container image of SPIRE agent and server
      - object
-     - ``{"digest":"sha256:b3255e7dfbcd10cb367af0d409747d511aeb66dfac98cf30e97e87e4207dd76f","override":null,"pullPolicy":"Always","repository":"docker.io/library/busybox","tag":"1.37.0","useDigest":true}``
+     - ``{"digest":"sha256:dc2d74b28e4cf8984fa52af1f39bc7c3d9c73760b41a74d629f5d11b1ab28616","override":null,"pullPolicy":"Always","repository":"docker.io/library/busybox","tag":"1.38.0","useDigest":true}``
    * - :spelling:ignore:`authentication.mutual.spire.install.namespace`
      - SPIRE namespace to install into
      - string
@@ -199,7 +199,7 @@
    * - :spelling:ignore:`authentication.mutual.spire.install.server.image`
      - SPIRE server image
      - object
-     - ``{"digest":"sha256:46a740705d5e15839552b1307aff44ef5ac42d9b444d073b4ccefd87c5269283","override":null,"pullPolicy":"Always","repository":"ghcr.io/spiffe/spire-server","tag":"1.14.1","useDigest":true}``
+     - ``{"digest":"sha256:4082f30d3e0ddc4000a171392c4ea174345ee44d161ee917c70b97b2ecfba141","override":null,"pullPolicy":"Always","repository":"ghcr.io/spiffe/spire-server","tag":"1.15.3","useDigest":true}``
    * - :spelling:ignore:`authentication.mutual.spire.install.server.initContainers`
      - SPIRE server init containers
      - list
@@ -488,6 +488,10 @@
      - Configure the mount point for the BPF filesystem
      - string
      - ``"/sys/fs/bpf"``
+   * - :spelling:ignore:`bpf.stats.enabled`
+     - Enable BPF statistics collection
+     - bool
+     - ``false``
    * - :spelling:ignore:`bpf.tproxy`
      - Configure the eBPF-based TPROXY (beta) to reduce reliance on iptables rules for implementing Layer 7 policy. Note this is incompatible with netkit (\ ``bpf.datapathMode=netkit``\ , ``bpf.datapathMode=netkit-l2``\ ).
      - bool
@@ -503,7 +507,7 @@
    * - :spelling:ignore:`certgen`
      - Configure certificate generation for Hubble integration. If hubble.tls.auto.method=cronJob, these values are used for the Kubernetes CronJob which will be scheduled regularly to (re)generate any certificates not provided manually.
      - object
-     - ``{"affinity":{},"annotations":{"cronJob":{},"job":{}},"cronJob":{"failedJobsHistoryLimit":1,"successfulJobsHistoryLimit":3},"extraVolumeMounts":[],"extraVolumes":[],"generateCA":true,"image":{"digest":"sha256:19921f48ee7e2295ea4dca955878a6cd8d70e6d4219d08f688e866ece9d95d4d","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/certgen","tag":"v0.3.2","useDigest":true},"nodeSelector":{},"podLabels":{},"priorityClassName":"","resources":{},"tolerations":[],"ttlSecondsAfterFinished":null}``
+     - ``{"affinity":{},"annotations":{"cronJob":{},"job":{}},"cronJob":{"failedJobsHistoryLimit":1,"successfulJobsHistoryLimit":3},"enforceCAValidityThroughoutLeavesDuration":true,"extraVolumeMounts":[],"extraVolumes":[],"generateCA":true,"image":{"digest":"sha256:14d29a176fc96d15b154559ce1a5baf01367c10baabfa7bb8028b72f087a56f0","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/certgen","tag":"v0.4.11","useDigest":true},"nodeSelector":{},"podLabels":{},"priorityClassName":"","resources":{},"tolerations":[],"ttlSecondsAfterFinished":null}``
    * - :spelling:ignore:`certgen.affinity`
      - Affinity for certgen
      - object
@@ -520,6 +524,10 @@
      - The number of successful finished jobs to keep
      - int
      - ``3``
+   * - :spelling:ignore:`certgen.enforceCAValidityThroughoutLeavesDuration`
+     - When set to true, certgen enforces that the certification authority chain remains valid for the entire duration of the leaf certificates to be generated, and fails with a hard error if that is not the case. This allows to flag early situations in which the CA certificates need to be manually regenerated, before they actually expire.
+     - bool
+     - ``true``
    * - :spelling:ignore:`certgen.extraVolumeMounts`
      - Additional certgen volumeMounts.
      - list
@@ -636,12 +644,20 @@
      - Specifies whether etcd data is stored in a temporary volume backed by the node's default medium, such as disk, SSD or network storage (Disk), or RAM (Memory). The Memory option enables improved etcd read and write performance at the cost of additional memory usage, which counts against the memory limits of the container.
      - string
      - ``"Disk"``
+   * - :spelling:ignore:`clustermesh.apiserver.etcdQPS`
+     - Rate limit for the apiserver container while syncing Kubernetes resources from the local cluster to the local etcd.
+     - int
+     - ``50``
    * - :spelling:ignore:`clustermesh.apiserver.extraArgs`
      - Additional clustermesh-apiserver arguments.
      - list
      - ``[]``
    * - :spelling:ignore:`clustermesh.apiserver.extraEnv`
      - Additional clustermesh-apiserver environment variables.
+     - list
+     - ``[]``
+   * - :spelling:ignore:`clustermesh.apiserver.extraInitContainers`
+     - Additional init containers added to the clustermesh-apiserver Deployment.
      - list
      - ``[]``
    * - :spelling:ignore:`clustermesh.apiserver.extraVolumeMounts`
@@ -660,10 +676,10 @@
      - Clustermesh API server image.
      - object
      - ``{"digest":"","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/clustermesh-apiserver-ci","tag":"latest","useDigest":false}``
-   * - :spelling:ignore:`clustermesh.apiserver.kvstoremesh.enabled`
-     - Enable KVStoreMesh. KVStoreMesh caches the information retrieved from the remote clusters in the local etcd instance (deprecated - KVStoreMesh will always be enabled once the option is removed).
-     - bool
-     - ``true``
+   * - :spelling:ignore:`clustermesh.apiserver.kvstoremesh.etcdQPS`
+     - Rate limit for the kvstoremesh container while syncing resources from all remote clusters to the local etcd.
+     - int
+     - ``100``
    * - :spelling:ignore:`clustermesh.apiserver.kvstoremesh.extraArgs`
      - Additional KVStoreMesh arguments.
      - list
@@ -884,6 +900,10 @@
      - Optional port to use as the node port for apiserver access.
      - int
      - ``32379``
+   * - :spelling:ignore:`clustermesh.apiserver.service.port`
+     - Service port for the clustermesh-apiserver service.
+     - int
+     - ``2379``
    * - :spelling:ignore:`clustermesh.apiserver.service.type`
      - The type of service used for apiserver access.
      - string
@@ -892,26 +912,14 @@
      - terminationGracePeriodSeconds for the clustermesh-apiserver deployment
      - int
      - ``30``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.admin`
-     - base64 encoded PEM values for the clustermesh-apiserver admin certificate and private key. Used if 'auto' is not enabled.
-     - object
-     - ``{"cert":"","key":""}``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.admin.cert`
-     - Deprecated, as secrets will always need to be created externally if ``auto`` is disabled.
-     - string
-     - ``""``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.admin.key`
-     - Deprecated, as secrets will always need to be created externally if ``auto`` is disabled.
-     - string
-     - ``""``
    * - :spelling:ignore:`clustermesh.apiserver.tls.authMode`
-     - Configure the clustermesh authentication mode. Supported values: - legacy:     All clusters access remote clustermesh instances with the same               username (i.e., remote). The "remote" certificate must be               generated with CN=remote if provided manually. - migration:  Intermediate mode required to upgrade from legacy to cluster               (and vice versa) with no disruption. Specifically, it enables               the creation of the per-cluster usernames, while still using               the common one for authentication. The "remote" certificate must               be generated with CN=remote if provided manually (same as legacy). - cluster:    Each cluster accesses remote etcd instances with a username               depending on the local cluster name (i.e., remote-\ :raw-html-m2r:`<cluster-name>`\ ).               The "remote" certificate must be generated with CN=remote-\ :raw-html-m2r:`<cluster-name>`               if provided manually. Cluster mode is meaningful only when the same               CA is shared across all clusters part of the mesh.
+     - Configure the clustermesh authentication mode. Supported values: - legacy:     All clusters access remote clustermesh instances with the same               username (i.e., remote). The "remote" certificate must be               generated with CN=remote if provided manually. - migration:  Intermediate mode required to upgrade from legacy to cluster               (and vice versa) with no disruption. Specifically, it enables               the creation of the per-cluster usernames, while still using               the common one for authentication. The "remote" certificate must               be generated with CN=remote if provided manually (same as legacy). - cluster:    Each cluster accesses remote etcd instances with a username               depending on the local cluster name (i.e., remote-\ :raw-html-m2r:`<cluster-name>`\ ).               The "remote" certificate must be generated with CN=remote-\ :raw-html-m2r:`<cluster-name>`               if provided manually. Cluster mode is meaningful only when the same               CA is shared across all clusters part of the mesh. - cluster-strict:               Same as cluster, but does not create the shared remote username.               Enable only after all clusters in the mesh use cluster mode.
      - string
-     - ``"migration"``
+     - ``"cluster"``
    * - :spelling:ignore:`clustermesh.apiserver.tls.auto`
      - Configure automatic TLS certificates generation. A Kubernetes CronJob is used the generate any certificates not provided by the user at installation time.
      - object
-     - ``{"certManagerIssuerRef":{},"certValidityDuration":1095,"enabled":true,"method":"helm"}``
+     - ``{"certManagerIssuerRef":{},"certValidityDuration":365,"enabled":true,"method":"helm","privateKey":{},"schedule":"0 0 1 */4 *","server":{"extraDnsNames":[],"extraIpAddresses":[]},"subject":{}}``
    * - :spelling:ignore:`clustermesh.apiserver.tls.auto.certManagerIssuerRef`
      - certmanager issuer used when clustermesh.apiserver.tls.auto.method=certmanager.
      - object
@@ -919,47 +927,35 @@
    * - :spelling:ignore:`clustermesh.apiserver.tls.auto.certValidityDuration`
      - Generated certificates validity duration in days.
      - int
-     - ``1095``
+     - ``365``
    * - :spelling:ignore:`clustermesh.apiserver.tls.auto.enabled`
      - When set to true, automatically generate a CA and certificates to enable mTLS between clustermesh-apiserver and external workload instances.  When set to false you need to pre-create the following secrets: - clustermesh-apiserver-server-cert - clustermesh-apiserver-admin-cert - clustermesh-apiserver-remote-cert - clustermesh-apiserver-local-cert The above secret should at least contains the keys ``tls.crt`` and ``tls.key`` and optionally ``ca.crt`` if a CA bundle is not configured.
      - bool
      - ``true``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.enableSecrets`
-     - Allow users to provide their own certificates Users may need to provide their certificates using a mechanism that requires they provide their own secrets. This setting does not apply to any of the auto-generated mechanisms below, it only restricts the creation of secrets via the ``tls-provided`` templates. This option is deprecated as secrets are expected to be created externally when 'auto' is not enabled.
-     - deprecated
-     - ``true``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.remote`
-     - base64 encoded PEM values for the clustermesh-apiserver remote cluster certificate and private key. Used if 'auto' is not enabled.
+   * - :spelling:ignore:`clustermesh.apiserver.tls.auto.privateKey`
+     - Private key options. These include the key algorithm and size, the used encoding and the rotation policy used when clustermesh.apiserver.tls.auto.method=certmanager. https://cert-manager.io/docs/reference/api-docs/#cert-manager.io/v1.CertificatePrivateKey
      - object
-     - ``{"cert":"","key":""}``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.remote.cert`
-     - Deprecated, as secrets will always need to be created externally if ``auto`` is disabled.
+     - ``{}``
+   * - :spelling:ignore:`clustermesh.apiserver.tls.auto.schedule`
+     - Schedule for certificates regeneration (regardless of their expiration date). Only used if method is "cronJob". If nil, then no recurring job will be created. Instead, only the one-shot job is deployed to generate the certificates at installation time.  Due to the out-of-band distribution of client certs to external workloads the CA is (re)regenerated only if it is not provided as a helm value and the k8s secret is manually deleted.  Defaults to midnight of the first day of every fourth month. For syntax, see https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/#schedule-syntax
      - string
-     - ``""``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.remote.key`
-     - Deprecated, as secrets will always need to be created externally if ``auto`` is disabled.
-     - string
-     - ``""``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.server`
-     - base64 encoded PEM values for the clustermesh-apiserver server certificate and private key. Used if 'auto' is not enabled.
-     - object
-     - ``{"cert":"","extraDnsNames":[],"extraIpAddresses":[],"key":""}``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.server.cert`
-     - Deprecated, as secrets will always need to be created externally if ``auto`` is disabled.
-     - string
-     - ``""``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.server.extraDnsNames`
+     - ``"0 0 1 */4 *"``
+   * - :spelling:ignore:`clustermesh.apiserver.tls.auto.server.extraDnsNames`
      - Extra DNS names added to certificate when it's auto generated
      - list
      - ``[]``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.server.extraIpAddresses`
+   * - :spelling:ignore:`clustermesh.apiserver.tls.auto.server.extraIpAddresses`
      - Extra IP addresses added to certificate when it's auto generated
      - list
      - ``[]``
-   * - :spelling:ignore:`clustermesh.apiserver.tls.server.key`
-     - Deprecated, as secrets will always need to be created externally if ``auto`` is disabled.
-     - string
-     - ``""``
+   * - :spelling:ignore:`clustermesh.apiserver.tls.auto.subject`
+     - X509Subject Full X509 name specification used when clustermesh.apiserver.tls.auto.method=certmanager. https://cert-manager.io/docs/reference/api-docs/#cert-manager.io/v1.X509Subject
+     - object
+     - ``{}``
+   * - :spelling:ignore:`clustermesh.apiserver.tls.disableDefaultVolumes`
+     - Disable the default TLS certificate volumes and mounts for clustermesh-apiserver (including KVStoreMesh), cilium-agent and cilium-operator, allowing you to provide your own via extraVolumes/extraVolumeMounts. This also disables mounting the clustermesh configuration, which then needs to be provided separately (likely at a different location).
+     - bool
+     - ``false``
    * - :spelling:ignore:`clustermesh.apiserver.tolerations`
      - Node tolerations for pod assignment on nodes with taints ref: https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/
      - list
@@ -1160,6 +1156,22 @@
      - commonLabels allows users to add common labels for all Cilium resources.
      - object
      - ``{}``
+   * - :spelling:ignore:`configDriftDetection`
+     - Configuration for the ConfigMap drift detection feature. When enabled, the agent continuously watches the cilium-config ConfigMap and exposes a cilium_drift_checker_config_delta Prometheus metric reporting the number of keys that differ between the ConfigMap and the agent's active settings. A non-zero value indicates that the agent has not yet applied all current ConfigMap changes and needs to be restarted.
+     - object
+     - ``{"driftChecker":true,"enabled":true,"ignoredKeys":[]}``
+   * - :spelling:ignore:`configDriftDetection.driftChecker`
+     - Enable the drift checker which compares the DynamicConfig table against the agent's active settings and publishes the cilium_drift_checker_config_delta metric.
+     - bool
+     - ``true``
+   * - :spelling:ignore:`configDriftDetection.enabled`
+     - Enable watching of the cilium-config ConfigMap and reflecting its contents into the agent's internal DynamicConfig table.
+     - bool
+     - ``true``
+   * - :spelling:ignore:`configDriftDetection.ignoredKeys`
+     - List of config-map keys to ignore when computing the drift delta.
+     - list
+     - ``[]``
    * - :spelling:ignore:`connectivityProbeFrequencyRatio`
      - Ratio of the connectivity probe frequency vs resource usage, a float in [0, 1]. 0 will give more frequent probing, 1 will give less frequent probing. Probing frequency is dynamically adjusted based on the cluster size.
      - float64
@@ -1200,6 +1212,18 @@
      - Grafana dashboards for cilium-agent grafana can import dashboards based on the label and value ref: https://github.com/grafana/helm-charts/tree/main/charts/grafana#sidecar-for-dashboards
      - object
      - ``{"annotations":{},"enabled":false,"label":"grafana_dashboard","labelValue":"1","namespace":null}``
+   * - :spelling:ignore:`datapathPlugins`
+     - Plugins to inject custom BPF into the datapath.
+     - object
+     - ``{"enabled":false,"stateDir":"/var/run/cilium/plugins"}``
+   * - :spelling:ignore:`datapathPlugins.enabled`
+     - Enable datapath plugins.
+     - bool
+     - ``false``
+   * - :spelling:ignore:`datapathPlugins.stateDir`
+     - Parent directory for per-plugin state directories.
+     - string
+     - ``"/var/run/cilium/plugins"``
    * - :spelling:ignore:`debug.enabled`
      - Enable debug logging
      - bool
@@ -1216,6 +1240,10 @@
      - defaultLBServiceIPAM indicates the default LoadBalancer Service IPAM when no LoadBalancer class is set. Applicable values: lbipam, nodeipam, none
      - string
      - ``"lbipam"``
+   * - :spelling:ignore:`devices`
+     - Specify which network interfaces can run the eBPF datapath. This means that a packet sent from a pod to a destination outside the cluster will be masqueraded (to an output device IPv4 address), if the output device runs the program. When not specified, probing will automatically detect devices that have a non-local route. This should be used only when auto-detection is not suitable. The devices are a comma-separated list and support '+' as a wildcard, e.g. "net0,eth+" matches "net0" and any device starting with "eth". A device can be excluded with "!", e.g. "net0,eth+,!eth0".
+     - string
+     - ``""``
    * - :spelling:ignore:`directRoutingSkipUnreachable`
      - Enable skipping of PodCIDR routes between worker nodes if the worker nodes are in a different L2 network segment.
      - bool
@@ -1257,7 +1285,7 @@
      - bool
      - ``true``
    * - :spelling:ignore:`dnsProxy.preCache`
-     - DNS cache data at this path is preloaded on agent startup.
+     - DNS cache data at this path is preloaded on agent startup. (deprecated: will be removed in v1.21)
      - string
      - ``""``
    * - :spelling:ignore:`dnsProxy.proxyPort`
@@ -1299,7 +1327,7 @@
    * - :spelling:ignore:`enableIPv6Masquerade`
      - Enables masquerading of IPv6 traffic leaving the node from endpoints.
      - bool
-     - ``true``
+     - ``true`` unless ipam eni mode is active
    * - :spelling:ignore:`enableInternalTrafficPolicy`
      - Enable Internal Traffic Policy
      - bool
@@ -1328,10 +1356,6 @@
      - Enable transparent network encryption.
      - bool
      - ``false``
-   * - :spelling:ignore:`encryption.ipsec.encryptedOverlay`
-     - Enable IPsec encrypted overlay
-     - bool
-     - ``false``
    * - :spelling:ignore:`encryption.ipsec.interface`
      - The interface to use for encrypted traffic.
      - string
@@ -1357,21 +1381,13 @@
      - string
      - ``"cilium-ipsec-keys"``
    * - :spelling:ignore:`encryption.nodeEncryption`
-     - Enable encryption for pure node to node traffic. This option is only effective when encryption.type is set to "wireguard".
+     - Enable encryption for pure node to node traffic. This option is only effective when encryption.type is set to "wireguard". Deprecated: will be removed in v1.22.
      - bool
      - ``false``
    * - :spelling:ignore:`encryption.strictMode`
      - Configure the Encryption Pod2Pod strict mode.
      - object
-     - ``{"allowRemoteNodeIdentities":false,"cidr":"","egress":{"allowRemoteNodeIdentities":false,"cidr":"","enabled":false},"enabled":false,"ingress":{"enabled":false}}``
-   * - :spelling:ignore:`encryption.strictMode.allowRemoteNodeIdentities`
-     - Allow dynamic lookup of remote node identities. (deprecated: please use encryption.strictMode.egress.allowRemoteNodeIdentities) This is required when tunneling is used or direct routing is used and the node CIDR and pod CIDR overlap.
-     - bool
-     - ``false``
-   * - :spelling:ignore:`encryption.strictMode.cidr`
-     - CIDR for the Encryption Pod2Pod strict mode. (deprecated: please use encryption.strictMode.egress.cidr)
-     - string
-     - ``""``
+     - ``{"egress":{"allowRemoteNodeIdentities":false,"cidr":"","enabled":false},"ingress":{"enabled":false}}``
    * - :spelling:ignore:`encryption.strictMode.egress.allowRemoteNodeIdentities`
      - Allow dynamic lookup of remote node identities. This is required when tunneling is used or direct routing is used and the node CIDR and pod CIDR overlap.
      - bool
@@ -1384,12 +1400,8 @@
      - Enable strict egress encryption.
      - bool
      - ``false``
-   * - :spelling:ignore:`encryption.strictMode.enabled`
-     - Enable Encryption Pod2Pod strict mode. (deprecated: please use encryption.strictMode.egress.enabled)
-     - bool
-     - ``false``
    * - :spelling:ignore:`encryption.strictMode.ingress.enabled`
-     - Enable strict ingress encryption. When enabled, all unencrypted overlay ingress traffic will be dropped. This option is only applicable when WireGuard and tunneling are enabled.
+     - Enable strict ingress encryption. When enabled, all unencrypted pod-to-pod ingress traffic will be dropped. This option requires WireGuard encryption.
      - bool
      - ``false``
    * - :spelling:ignore:`encryption.type`
@@ -1403,7 +1415,7 @@
    * - :spelling:ignore:`encryption.ztunnel`
      - ztunnel encryption configuration. ztunnel is Istio's purpose-built, per-node proxy for handling L4 traffic in ambient mesh mode. These settings only apply when encryption.type is set to "ztunnel".
      - object
-     - ``{"affinity":{},"annotations":{},"caAddress":"https://localhost:15012","extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"healthPort":15021,"image":{"digest":null,"override":null,"pullPolicy":"IfNotPresent","repository":"docker.io/istio/ztunnel","tag":"1.28.0-distroless","useDigest":false},"nodeSelector":{"kubernetes.io/os":"linux"},"podAnnotations":{},"podLabels":{},"priorityClassName":null,"readinessProbe":{"failureThreshold":3,"initialDelaySeconds":0,"periodSeconds":10},"resources":{"requests":{"cpu":"200m","memory":"512Mi"}},"secrets":{"bootstrapRootCert":null},"terminationGracePeriodSeconds":30,"tolerations":[{"effect":"NoSchedule","operator":"Exists"},{"key":"CriticalAddonsOnly","operator":"Exists"},{"effect":"NoExecute","operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxSurge":1,"maxUnavailable":0},"type":"RollingUpdate"}}``
+     - ``{"affinity":{},"annotations":{},"ca":{"type":"internal"},"caAddress":"https://localhost:15012","extraEnv":[],"extraVolumeMounts":[],"extraVolumes":[],"healthPort":15021,"image":{"digest":"sha256:884de5adde400e39f58e36c7a729f7690466ca4a8eb4c2a8daa9c1c025115b24","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/ztunnel","tag":"v1.0.0","useDigest":true},"minReadySeconds":0,"nodeSelector":{"kubernetes.io/os":"linux"},"podAnnotations":{},"podLabels":{},"priorityClassName":null,"readinessProbe":{"failureThreshold":3,"initialDelaySeconds":0,"periodSeconds":10},"resources":{"requests":{"cpu":"200m","memory":"512Mi"}},"secrets":{"bootstrapRootCert":null},"terminationGracePeriodSeconds":30,"tolerations":[{"effect":"NoSchedule","operator":"Exists"},{"key":"CriticalAddonsOnly","operator":"Exists"},{"effect":"NoExecute","operator":"Exists"}],"updateStrategy":{"rollingUpdate":{"maxSurge":1,"maxUnavailable":0},"type":"RollingUpdate"}}``
    * - :spelling:ignore:`encryption.ztunnel.affinity`
      - Affinity for ztunnel pods.
      - object
@@ -1412,6 +1424,14 @@
      - Annotations to be added to all ztunnel resources.
      - object
      - ``{}``
+   * - :spelling:ignore:`encryption.ztunnel.ca`
+     - CA backend used by ztunnel to issue workload identities.
+     - object
+     - ``{"type":"internal"}``
+   * - :spelling:ignore:`encryption.ztunnel.ca.type`
+     - Type of CA. "spire" uses an external SPIRE server (the operator then manages SPIRE entries for enrolled namespaces). "internal" uses Cilium's built-in CA and skips the SPIRE enrollment reconciler.
+     - string
+     - ``"internal"``
    * - :spelling:ignore:`encryption.ztunnel.caAddress`
      - CA server address for certificate requests.
      - string
@@ -1435,7 +1455,11 @@
    * - :spelling:ignore:`encryption.ztunnel.image`
      - ztunnel container image.
      - object
-     - ``{"digest":null,"override":null,"pullPolicy":"IfNotPresent","repository":"docker.io/istio/ztunnel","tag":"1.28.0-distroless","useDigest":false}``
+     - ``{"digest":"sha256:884de5adde400e39f58e36c7a729f7690466ca4a8eb4c2a8daa9c1c025115b24","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/ztunnel","tag":"v1.0.0","useDigest":true}``
+   * - :spelling:ignore:`encryption.ztunnel.minReadySeconds`
+     - Minimum number of seconds for which a newly created ztunnel pod should be ready before it is considered available.
+     - int
+     - ``0``
    * - :spelling:ignore:`encryption.ztunnel.nodeSelector`
      - Node selector for ztunnel pods.
      - object
@@ -1488,6 +1512,10 @@
      - Enable endpoint lockdown on policy map overflow.
      - bool
      - ``false``
+   * - :spelling:ignore:`endpointPolicyUpdateTimeoutDuration`
+     - Max duration to wait for envoy to respond to configuration changes. Default "10s".
+     - string
+     - ``""``
    * - :spelling:ignore:`endpointRoutes.enabled`
      - Enable use of per endpoint routes instead of routing via the cilium_host interface.
      - bool
@@ -1596,6 +1624,10 @@
      - Maximum number of connections on Envoy clusters
      - int
      - ``1024``
+   * - :spelling:ignore:`envoy.clusterMaxPendingRequests`
+     - Maximum number of pending requests on Envoy clusters
+     - int
+     - ``1024``
    * - :spelling:ignore:`envoy.clusterMaxRequests`
      - Maximum number of requests on Envoy clusters
      - int
@@ -1652,6 +1684,10 @@
      - Maximum number of retries for each HTTP request
      - int
      - ``3``
+   * - :spelling:ignore:`envoy.httpRetryTimeout`
+     - Time in seconds after which a forwarded but uncompleted HTTP request is retried. Default 0 (never).
+     - int
+     - ``0``
    * - :spelling:ignore:`envoy.httpUpstreamLingerTimeout`
      - Time in seconds to block Envoy worker thread while an upstream HTTP connection is closing. If set to 0, the connection is closed immediately (with TCP RST). If set to -1, the connection is closed asynchronously in the background.
      - string
@@ -1663,7 +1699,7 @@
    * - :spelling:ignore:`envoy.image`
      - Envoy container image.
      - object
-     - ``{"digest":"sha256:e276f5f47a8ed722bdaad25f468e420825581bdf1d74f7a5e658429ec45b2691","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/cilium-envoy","tag":"v1.36.5-1772193645-b07509fe16cf8f27fc2eeffb641e19c040aaa4cf","useDigest":true}``
+     - ``{"digest":"sha256:1b958363b16328905d93371dd974cc57e8ff277f8e589b31de9ff8e805013b9f","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/cilium-envoy","tag":"v1.38.4-1788418248-230e609978a4f7e614671e0e7e00a1911b93406c","useDigest":true}``
    * - :spelling:ignore:`envoy.initContainers`
      - Init containers added to the cilium Envoy DaemonSet.
      - list
@@ -1680,14 +1716,26 @@
      - failure threshold of liveness probe
      - int
      - ``10``
+   * - :spelling:ignore:`envoy.livenessProbe.initialDelaySeconds`
+     - Initial delay before the liveness probe begins
+     - int
+     - ``0``
    * - :spelling:ignore:`envoy.livenessProbe.periodSeconds`
      - interval between checks of the liveness probe
      - int
      - ``30``
+   * - :spelling:ignore:`envoy.livenessProbe.timeoutSeconds`
+     - Timeout for the liveness probe
+     - int
+     - ``5``
    * - :spelling:ignore:`envoy.log.accessLogBufferSize`
      - Size of the Envoy access log buffer created within the agent in bytes. Tune this value up if you encounter "Envoy: Discarded truncated access log message" errors. Large request/response header sizes (e.g. 16KiB) will require a larger buffer size.
      - int
      - ``4096``
+   * - :spelling:ignore:`envoy.log.accessLogEnabled`
+     - Enable access log forwarding for integration with Hubble.
+     - bool
+     - ``true``
    * - :spelling:ignore:`envoy.log.defaultLevel`
      - Default log level of Envoy application log that is configured if Cilium debug / verbose logging isn't enabled. This option allows to have a different log level than the Cilium Agent - e.g. lower it to ``critical``. Possible values: trace, debug, info, warning, error, critical, off
      - string
@@ -1720,6 +1768,14 @@
      - ProxyMaxRequestsPerConnection specifies the max_requests_per_connection setting for Envoy
      - int
      - ``0``
+   * - :spelling:ignore:`envoy.minReadySeconds`
+     - Minimum number of seconds for which a newly created envoy pod should be ready before it is considered available.
+     - int
+     - ``0``
+   * - :spelling:ignore:`envoy.nodeLocality.enabled`
+     - Enable node-locality support for cilium-envoy. When enabled, Cilium looks up the node zone from the topology label and passes it to the Envoy process via ``--service-zone``. Startup fails if the zone cannot be resolved or the label is empty.
+     - bool
+     - ``false``
    * - :spelling:ignore:`envoy.nodeSelector`
      - Node selector for cilium-envoy.
      - object
@@ -1792,10 +1848,18 @@
      - failure threshold of readiness probe
      - int
      - ``3``
+   * - :spelling:ignore:`envoy.readinessProbe.initialDelaySeconds`
+     - Initial delay before the readiness probe begins
+     - int
+     - ``0``
    * - :spelling:ignore:`envoy.readinessProbe.periodSeconds`
      - interval between checks of the readiness probe
      - int
      - ``30``
+   * - :spelling:ignore:`envoy.readinessProbe.timeoutSeconds`
+     - Timeout for the readiness probe
+     - int
+     - ``5``
    * - :spelling:ignore:`envoy.resources`
      - Envoy resource limits & requests ref: https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/
      - object
@@ -1805,7 +1869,7 @@
      - bool
      - ``false``
    * - :spelling:ignore:`envoy.securityContext.capabilities.envoy`
-     - Capabilities for the ``cilium-envoy`` container. Even though granted to the container, the cilium-envoy-starter wrapper drops all capabilities after forking the actual Envoy process. ``NET_BIND_SERVICE`` is the only capability that can be passed to the Envoy process by setting ``envoy.securityContext.capabilities.keepNetBindService=true`` (in addition to granting the capability to the container). Note: In case of embedded envoy, the capability must  be granted to the cilium-agent container.
+     - Capabilities for the ``cilium-envoy`` container. Even though granted to the container, the cilium-envoy-starter wrapper drops all capabilities after forking the actual Envoy process. ``NET_BIND_SERVICE`` is the only capability that can be passed to the Envoy process by setting ``envoy.securityContext.capabilities.keepCapNetBindService=true`` (in addition to granting the capability to the container). Note: In case of embedded envoy, the capability must  be granted to the cilium-agent container.
      - list
      - ``["NET_ADMIN","SYS_ADMIN"]``
    * - :spelling:ignore:`envoy.securityContext.capabilities.keepCapNetBindService`
@@ -1828,10 +1892,22 @@
      - failure threshold of startup probe. 105 x 2s translates to the old behaviour of the readiness probe (120s delay + 30 x 3s)
      - int
      - ``105``
+   * - :spelling:ignore:`envoy.startupProbe.initialDelaySeconds`
+     - Initial delay before the startup probe begins
+     - int
+     - ``5``
    * - :spelling:ignore:`envoy.startupProbe.periodSeconds`
      - interval between checks of the startup probe
      - int
      - ``2``
+   * - :spelling:ignore:`envoy.startupProbe.timeoutSeconds`
+     - Timeout for the startup probe
+     - int
+     - ``5``
+   * - :spelling:ignore:`envoy.staticRuntimeConfig`
+     - Static runtime bootstrap config for envoy. ref: https://www.envoyproxy.io/docs/envoy/latest/configuration/operations/runtime#static-bootstrap
+     - object
+     - ``{}``
    * - :spelling:ignore:`envoy.streamIdleTimeoutDurationSeconds`
      - Set Envoy the amount of time that the connection manager will allow a stream to exist with no upstream or downstream activity. default 5 minutes
      - int
@@ -1852,6 +1928,10 @@
      - For cases when CiliumEnvoyConfig is not used directly (Ingress, Gateway), configures Cilium BPF Metadata listener filter to use the original source address when extracting the metadata for a request.
      - bool
      - ``true``
+   * - :spelling:ignore:`envoy.xdsMode`
+     - xDS server operating mode for Envoy proxy configuration. Supported values are: "split" for the existing per-resource-type xDS, "delta-split" for incremental Delta xDS, "ads" for the ADS (Aggregated Discovery Service) xDS, and "strict-ads" for ADS with strict snapshot cache behavior and generated snapshot consistency checks. Null value omits setting this option. Cilium Agent defaults missing option to "split" to keep upgrades in the legacy mode.
+     - string
+     - ``ads`` for new 1.20+ installations; none when ``upgradeCompatibility`` is set below ``1.20``
    * - :spelling:ignore:`envoy.xffNumTrustedHopsL7PolicyEgress`
      - Number of trusted hops regarding the x-forwarded-for and related HTTP headers for the egress L7 policy enforcement Envoy listeners.
      - int
@@ -1974,6 +2054,10 @@
      - ``"cilium-secrets"``
    * - :spelling:ignore:`gatewayAPI.secretsNamespace.sync`
      - Enable secret sync, which will make sure all TLS secrets used by Ingress are synced to secretsNamespace.name. If disabled, TLS secrets must be maintained externally.
+     - bool
+     - ``true``
+   * - :spelling:ignore:`gatewayAPI.useRemoteAddress`
+     - Configure whether to use the remote address of the client when determining the source IP. When enabled, the source IP is determined from the remote address instead of the proxy protocol header.
      - bool
      - ``true``
    * - :spelling:ignore:`gatewayAPI.xffNumTrustedHops`
@@ -2185,7 +2269,7 @@
      - int
      - ``4244``
    * - :spelling:ignore:`hubble.preferIpv6`
-     - Whether Hubble should prefer to announce IPv6 or IPv4 addresses if both are available.
+     - Whether Hubble should prefer to announce IPv6 or IPv4 addresses if both are available. Deprecated: use top-level preferIpv6 instead.
      - bool
      - ``false``
    * - :spelling:ignore:`hubble.redact`
@@ -2222,6 +2306,10 @@
      - ``false``
    * - :spelling:ignore:`hubble.relay.extraEnv`
      - Additional hubble-relay environment variables.
+     - list
+     - ``[]``
+   * - :spelling:ignore:`hubble.relay.extraInitContainers`
+     - Additional init containers added to the hubble-relay Deployment.
      - list
      - ``[]``
    * - :spelling:ignore:`hubble.relay.extraVolumeMounts`
@@ -2399,7 +2487,7 @@
    * - :spelling:ignore:`hubble.relay.tls`
      - TLS configuration for Hubble Relay
      - object
-     - ``{"client":{"cert":"","existingSecret":"","key":""},"server":{"cert":"","enabled":false,"existingSecret":"","extraDnsNames":[],"extraIpAddresses":[],"key":"","mtls":false,"relayName":"ui.hubble-relay.cilium.io"}}``
+     - ``{"client":{"cert":"","existingSecret":"","key":""},"disableDefaultVolumes":false,"server":{"cert":"","enabled":false,"existingSecret":"","extraDnsNames":[],"extraIpAddresses":[],"key":"","mtls":false,"relayName":"ui.hubble-relay.cilium.io"}}``
    * - :spelling:ignore:`hubble.relay.tls.client`
      - The hubble-relay client certificate and private key. This keypair is presented to Hubble server instances for mTLS authentication and is required when hubble.tls.enabled is true. These values need to be set manually if hubble.tls.auto.enabled is false.
      - object
@@ -2416,6 +2504,10 @@
      - base64 encoded PEM values for the Hubble relay client key (deprecated). Use existingSecret instead.
      - string
      - ``""``
+   * - :spelling:ignore:`hubble.relay.tls.disableDefaultVolumes`
+     - Disable the default TLS certificate volumes and mounts for Hubble Relay, allowing you to provide your own via extraVolumes/extraVolumeMounts.
+     - bool
+     - ``false``
    * - :spelling:ignore:`hubble.relay.tls.server`
      - The hubble-relay server certificate and private key
      - object
@@ -2463,11 +2555,11 @@
    * - :spelling:ignore:`hubble.tls`
      - TLS configuration for Hubble
      - object
-     - ``{"auto":{"certManagerIssuerRef":{},"certValidityDuration":365,"enabled":true,"method":"helm","schedule":"0 0 1 */4 *"},"enabled":true,"server":{"cert":"","existingSecret":"","extraDnsNames":[],"extraIpAddresses":[],"key":""}}``
+     - ``{"auto":{"certManagerIssuerRef":{},"certValidityDuration":365,"enabled":true,"method":"helm","privateKey":{},"schedule":"0 0 1 */4 *","subject":{}},"disableDefaultVolumes":false,"enabled":true,"server":{"cert":"","existingSecret":"","extraDnsNames":[],"extraIpAddresses":[],"key":""}}``
    * - :spelling:ignore:`hubble.tls.auto`
      - Configure automatic TLS certificates generation.
      - object
-     - ``{"certManagerIssuerRef":{},"certValidityDuration":365,"enabled":true,"method":"helm","schedule":"0 0 1 */4 *"}``
+     - ``{"certManagerIssuerRef":{},"certValidityDuration":365,"enabled":true,"method":"helm","privateKey":{},"schedule":"0 0 1 */4 *","subject":{}}``
    * - :spelling:ignore:`hubble.tls.auto.certManagerIssuerRef`
      - certmanager issuer used when hubble.tls.auto.method=certmanager.
      - object
@@ -2484,10 +2576,22 @@
      - Set the method to auto-generate certificates. Supported values: - helm:         This method uses Helm to generate all certificates. - cronJob:      This method uses a Kubernetes CronJob the generate any                 certificates not provided by the user at installation                 time. - certmanager:  This method use cert-manager to generate & rotate certificates.
      - string
      - ``"helm"``
+   * - :spelling:ignore:`hubble.tls.auto.privateKey`
+     - Private key options. These include the key algorithm and size, the used encoding and the rotation policy used when hubble.tls.auto.method=certmanager. https://cert-manager.io/docs/reference/api-docs/#cert-manager.io/v1.CertificatePrivateKey
+     - object
+     - ``{}``
    * - :spelling:ignore:`hubble.tls.auto.schedule`
      - Schedule for certificates regeneration (regardless of their expiration date). Only used if method is "cronJob". If nil, then no recurring job will be created. Instead, only the one-shot job is deployed to generate the certificates at installation time.  Defaults to midnight of the first day of every fourth month. For syntax, see https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/#schedule-syntax
      - string
      - ``"0 0 1 */4 *"``
+   * - :spelling:ignore:`hubble.tls.auto.subject`
+     - X509Subject Full X509 name specification used when hubble.tls.auto.method=certmanager. https://cert-manager.io/docs/reference/api-docs/#cert-manager.io/v1.X509Subject
+     - object
+     - ``{}``
+   * - :spelling:ignore:`hubble.tls.disableDefaultVolumes`
+     - Disable the default TLS certificate volumes and mounts for the Hubble server, allowing you to provide your own via extraVolumes/extraVolumeMounts.
+     - bool
+     - ``false``
    * - :spelling:ignore:`hubble.tls.enabled`
      - Enable mutual TLS for listenAddress. Setting this value to false is highly discouraged as the Hubble API provides access to potentially sensitive network flow metadata and is exposed on the host network.
      - bool
@@ -2539,7 +2643,7 @@
    * - :spelling:ignore:`hubble.ui.backend.image`
      - Hubble-ui backend image.
      - object
-     - ``{"digest":"sha256:db1454e45dc39ca41fbf7cad31eec95d99e5b9949c39daaad0fa81ef29d56953","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/hubble-ui-backend","tag":"v0.13.3","useDigest":true}``
+     - ``{"digest":"sha256:fac0c300ae119274edca11fd89b1ad23c788792d8bc4ea2ba631c709e8d3c688","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/hubble-ui-backend","tag":"v0.13.5","useDigest":true}``
    * - :spelling:ignore:`hubble.ui.backend.resources`
      - Resource requests and limits for the 'backend' container of the 'hubble-ui' deployment.
      - object
@@ -2556,6 +2660,10 @@
      - Whether to enable the Hubble UI.
      - bool
      - ``false``
+   * - :spelling:ignore:`hubble.ui.extraInitContainers`
+     - Additional init containers added to the hubble-ui Deployment.
+     - list
+     - ``[]``
    * - :spelling:ignore:`hubble.ui.frontend.extraEnv`
      - Additional hubble-ui frontend environment variables.
      - list
@@ -2571,7 +2679,7 @@
    * - :spelling:ignore:`hubble.ui.frontend.image`
      - Hubble-ui frontend image.
      - object
-     - ``{"digest":"sha256:661d5de7050182d495c6497ff0b007a7a1e379648e60830dd68c4d78ae21761d","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/hubble-ui","tag":"v0.13.3","useDigest":true}``
+     - ``{"digest":"sha256:f7d514fc54d784ed6df9d58cf0e97648b143f92b766dd1780ed3fc845bd4c516","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/hubble-ui","tag":"v0.13.5","useDigest":true}``
    * - :spelling:ignore:`hubble.ui.frontend.resources`
      - Resource requests and limits for the 'frontend' container of the 'hubble-ui' deployment.
      - object
@@ -2584,6 +2692,14 @@
      - Controls server listener for ipv6
      - object
      - ``{"enabled":true}``
+   * - :spelling:ignore:`hubble.ui.httpRoute`
+     - hubble-ui GatewayAPI HTTPRoute configuration.
+     - object
+     - ``{"annotations":{},"enabled":false,"hostnames":["chart-example.local"],"labels":{},"parentRefs":[{"name":"cilium-gateway","namespace":"kube-system"}]}``
+   * - :spelling:ignore:`hubble.ui.httpRoute.parentRefs`
+     - parentRefs define which Gateways this HTTPRoute attaches to.
+     - list
+     - ``[{"name":"cilium-gateway","namespace":"kube-system"}]``
    * - :spelling:ignore:`hubble.ui.ingress`
      - hubble-ui ingress configuration.
      - object
@@ -2676,6 +2792,10 @@
      - base64 encoded PEM values for the Hubble UI client key (deprecated). Use existingSecret instead.
      - string
      - ``""``
+   * - :spelling:ignore:`hubble.ui.tls.disableDefaultVolumes`
+     - Disable the default TLS certificate volumes and mounts for Hubble UI, allowing you to provide your own via extraVolumes/extraVolumeMounts.
+     - bool
+     - ``false``
    * - :spelling:ignore:`hubble.ui.tmpVolume`
      - Configure temporary volume for hubble-ui
      - object
@@ -2828,6 +2948,14 @@
      - Service type for the shared LB service
      - string
      - ``"LoadBalancer"``
+   * - :spelling:ignore:`ingressController.useRemoteAddress`
+     - Configure whether to use the remote address of the client when determining the source IP. When enabled, the source IP is determined from the remote address instead of the proxy protocol header.
+     - bool
+     - ``true``
+   * - :spelling:ignore:`ingressController.xffNumTrustedHops`
+     - The number of additional Ingress proxy hops from the right side of the HTTP header to trust when determining the origin client's IP address.
+     - int
+     - ``0``
    * - :spelling:ignore:`initResources`
      - resources & limits for the agent init containers
      - object
@@ -2927,7 +3055,11 @@
    * - :spelling:ignore:`k8s`
      - Configure Kubernetes specific configuration
      - object
-     - ``{"requireIPv4PodCIDR":false,"requireIPv6PodCIDR":false}``
+     - ``{"apiServerURLs":null,"requireIPv4PodCIDR":false,"requireIPv6PodCIDR":false}``
+   * - :spelling:ignore:`k8s.apiServerURLs`
+     - A space separated list of Kubernetes API server URLs to use with the client. For example "https://192.168.0.1:6443 https://192.168.0.2:6443"
+     - string
+     - ``nil``
    * - :spelling:ignore:`k8s.requireIPv4PodCIDR`
      - requireIPv4PodCIDR enables waiting for Kubernetes to provide the PodCIDR range via the Kubernetes node resource
      - bool
@@ -3047,15 +3179,15 @@
    * - :spelling:ignore:`l2podAnnouncements`
      - Configure L2 pod announcements
      - object
-     - ``{"enabled":false,"interface":"eth0"}``
+     - ``{"enabled":false,"interfacePattern":""}``
    * - :spelling:ignore:`l2podAnnouncements.enabled`
      - Enable L2 pod announcements
      - bool
      - ``false``
-   * - :spelling:ignore:`l2podAnnouncements.interface`
-     - Interface used for sending Gratuitous ARP pod announcements
+   * - :spelling:ignore:`l2podAnnouncements.interfacePattern`
+     - A regular expression matching interfaces used for sending Gratuitous ARP pod announcements
      - string
-     - ``"eth0"``
+     - ``""``
    * - :spelling:ignore:`l7Proxy`
      - Enable Layer 7 network policy.
      - bool
@@ -3120,6 +3252,10 @@
      - Configure maglev consistent hashing
      - object
      - ``{}``
+   * - :spelling:ignore:`minReadySeconds`
+     - Minimum number of seconds for which a newly created agent pod should be ready before it is considered available. Defaults to 0 (pod is considered available as soon as it is ready). ref: https://kubernetes.io/docs/tasks/manage-daemon/update-daemon-set/
+     - int
+     - ``0``
    * - :spelling:ignore:`monitor`
      - cilium-monitor sidecar.
      - object
@@ -3152,6 +3288,14 @@
      - Enable RFC6052-prefixed translation
      - bool
      - ``false``
+   * - :spelling:ignore:`nativeRoutingCIDRFromClusterPool`
+     - Derive the native routing CIDRs from the cluster-pool IPAM CIDRs when ipv4NativeRoutingCIDR / ipv6NativeRoutingCIDR are not explicitly set. Only effective with ipam.mode=cluster-pool and requires exactly one CIDR per enabled IP family in clusterPoolIPv4PodCIDRList / clusterPoolIPv6PodCIDRList.
+     - bool
+     - ``false``
+   * - :spelling:ignore:`networkDriver`
+     - Enable the Network Driver feature
+     - object
+     - ``{"enabled":false}``
    * - :spelling:ignore:`nodeIPAM.enabled`
      - Configure Node IPAM ref: https://docs.cilium.io/en/stable/network/node-ipam/
      - bool
@@ -3159,7 +3303,7 @@
    * - :spelling:ignore:`nodePort`
      - Configure N-S k8s service loadbalancing
      - object
-     - ``{"addresses":null,"autoProtectPortRange":true,"bindProtection":true,"enableHealthCheck":true,"enableHealthCheckLoadBalancerIP":false}``
+     - ``{"addresses":null,"autoProtectPortRange":true,"bindProtection":true,"enableDynamicSourceLookup":false,"enableHealthCheck":true,"enableHealthCheckLoadBalancerIP":false,"extendedNATPortRange":""}``
    * - :spelling:ignore:`nodePort.addresses`
      - List of CIDRs for choosing which IP addresses assigned to native devices are used for NodePort load-balancing. By default this is empty and the first suitable, preferably private, IPv4 and IPv6 address assigned to each device is used.  Example:    addresses: ["192.168.1.0/24", "2001::/64"]
      - string
@@ -3172,6 +3316,10 @@
      - Set to true to prevent applications binding to service ports.
      - bool
      - ``true``
+   * - :spelling:ignore:`nodePort.enableDynamicSourceLookup`
+     - Enable dynamic source IP resolution for SNAT via linux's routing table. The kernel must support this feature.
+     - bool
+     - ``false``
    * - :spelling:ignore:`nodePort.enableHealthCheck`
      - Enable healthcheck nodePort server for NodePort services
      - bool
@@ -3180,6 +3328,10 @@
      - Enable access of the healthcheck nodePort on the LoadBalancerIP. Needs EnableHealthCheck to be enabled
      - bool
      - ``false``
+   * - :spelling:ignore:`nodePort.extendedNATPortRange`
+     - Configure an extended range of ephemeral ports for BPF masquerade (e.g. "1024,29999")
+     - string
+     - ``""``
    * - :spelling:ignore:`nodeSelector`
      - Node selector for cilium-agent.
      - object
@@ -3219,7 +3371,11 @@
    * - :spelling:ignore:`nodeinit.image`
      - node-init image.
      - object
-     - ``{"digest":"sha256:a97e8766c62e0e36f47e366f7571d561bd9c603515e94b9f4cb8e6c131843d02","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/startup-script","tag":"1770904355-d9c9e58","useDigest":true}``
+     - ``{"digest":"sha256:f99e2beda7324e93ba04d6240d9626a6b9ab023d7d56e3b029d3d9c823ce63ef","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/startup-script","tag":"1782916218-36ae25f","useDigest":true}``
+   * - :spelling:ignore:`nodeinit.minReadySeconds`
+     - Minimum number of seconds for which a newly created node-init pod should be ready before it is considered available.
+     - int
+     - ``0``
    * - :spelling:ignore:`nodeinit.nodeSelector`
      - Node labels for nodeinit pod assignment ref: https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#nodeselector
      - object
@@ -3306,6 +3462,10 @@
      - ``[]``
    * - :spelling:ignore:`operator.extraHostPathMounts`
      - Additional cilium-operator hostPath mounts.
+     - list
+     - ``[]``
+   * - :spelling:ignore:`operator.extraInitContainers`
+     - Additional init containers added to the operator Deployment.
      - list
      - ``[]``
    * - :spelling:ignore:`operator.extraVolumeMounts`
@@ -3552,6 +3712,10 @@
      - Configure pprof listen port for cilium-agent
      - int
      - ``6060``
+   * - :spelling:ignore:`preferIpv6`
+     - Prefer IPv6 addresses over IPv4 when both are available for health probes and Hubble peer communication.
+     - bool
+     - ``false``
    * - :spelling:ignore:`preflight.affinity`
      - Affinity for cilium-preflight
      - object
@@ -3567,7 +3731,7 @@
    * - :spelling:ignore:`preflight.envoy.image`
      - Envoy pre-flight image.
      - object
-     - ``{"digest":"sha256:e276f5f47a8ed722bdaad25f468e420825581bdf1d74f7a5e658429ec45b2691","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/cilium-envoy","tag":"v1.36.5-1772193645-b07509fe16cf8f27fc2eeffb641e19c040aaa4cf","useDigest":true}``
+     - ``{"digest":"sha256:1b958363b16328905d93371dd974cc57e8ff277f8e589b31de9ff8e805013b9f","override":null,"pullPolicy":"Always","repository":"quay.io/cilium/cilium-envoy","tag":"v1.38.4-1788418248-230e609978a4f7e614671e0e7e00a1911b93406c","useDigest":true}``
    * - :spelling:ignore:`preflight.extraEnv`
      - Additional preflight environment variables.
      - list
@@ -3640,10 +3804,6 @@
      - Configure termination grace period for preflight Deployment and DaemonSet.
      - int
      - ``1``
-   * - :spelling:ignore:`preflight.tofqdnsPreCache`
-     - Path to write the ``--tofqdns-pre-cache`` file to.
-     - string
-     - ``""``
    * - :spelling:ignore:`preflight.tolerations`
      - Node tolerations for preflight scheduling to nodes with taints ref: https://kubernetes.io/docs/concepts/scheduling-eviction/taint-and-toleration/
      - list
@@ -3831,7 +3991,7 @@
    * - :spelling:ignore:`standaloneDnsProxy`
      - Standalone DNS Proxy Configuration Note: The standalone DNS proxy uses the agent's dnsProxy.* configuration for DNS settings (proxyPort, enableDnsCompression) to ensure consistency.
      - object
-     - ``{"annotations":{},"automountServiceAccountToken":false,"debug":false,"enabled":false,"image":{"digest":"","override":null,"pullPolicy":"Always","repository":"","tag":"","useDigest":false},"nodeSelector":{"kubernetes.io/os":"linux"},"rollOutPods":false,"serverPort":10095,"tolerations":[],"updateStrategy":{"rollingUpdate":{"maxSurge":2,"maxUnavailable":0},"type":"RollingUpdate"}}``
+     - ``{"annotations":{},"automountServiceAccountToken":false,"debug":false,"enabled":false,"image":{"digest":"","override":null,"pullPolicy":"Always","repository":"","tag":"","useDigest":false},"minReadySeconds":5,"nodeSelector":{"kubernetes.io/os":"linux"},"rollOutPods":false,"serverPort":10095,"tolerations":[],"updateStrategy":{"rollingUpdate":{"maxSurge":2,"maxUnavailable":0},"type":"RollingUpdate"}}``
    * - :spelling:ignore:`standaloneDnsProxy.annotations`
      - Standalone DNS proxy annotations
      - object
@@ -3852,6 +4012,10 @@
      - Standalone DNS proxy image
      - object
      - ``{"digest":"","override":null,"pullPolicy":"Always","repository":"","tag":"","useDigest":false}``
+   * - :spelling:ignore:`standaloneDnsProxy.minReadySeconds`
+     - Minimum number of seconds for which a newly created standalone DNS proxy pod should be ready before it is considered available.
+     - int
+     - ``5``
    * - :spelling:ignore:`standaloneDnsProxy.nodeSelector`
      - Standalone DNS proxy Node Selector
      - object

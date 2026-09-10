@@ -6,7 +6,6 @@
 #include "pktgen.h"
 
 #define ETH_HLEN 0
-#define ENABLE_HOST_ROUTING 1
 #define ENABLE_IPV4 1
 #define ENABLE_IPV6 1
 
@@ -76,6 +75,10 @@ ASSIGN_CONFIG(union macaddr, interface_mac, router_mac)
 # include "bpf_host.c"
 # include "lib/endpoint.h"
 #endif
+
+ASSIGN_CONFIG(bool, enable_bpf_host_routing, true)
+
+#include "lib/metrics.h"
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
@@ -183,17 +186,13 @@ l3_to_l2_fast_redirect_setup(struct __ctx_buff *ctx, bool is_ingress, bool is_ip
 	void *data = (void *)(long)ctx->data;
 	void *data_end = (void *)(long)ctx->data_end;
 	__u64 flags = BPF_F_ADJ_ROOM_FIXED_GSO;
-	struct metrics_key key = {
-#if defined(IS_BPF_HOST)
-		.reason = is_ingress ? REASON_PLAINTEXT : REASON_FORWARDED,
-#endif
-#if defined(IS_BPF_WIREGUARD)
-		.reason = is_ingress ? REASON_DECRYPTING : REASON_ENCRYPTING,
-#endif
-		.dir = is_ingress ? METRIC_INGRESS : METRIC_EGRESS,
-	};
 
-	map_delete_elem(&cilium_metrics, &key);
+	if (is_defined(IS_BPF_HOST))
+		metrics_del_entry(is_ingress ? REASON_PLAINTEXT : REASON_FORWARDED,
+				  is_ingress ? METRIC_INGRESS : METRIC_EGRESS);
+	if (is_defined(IS_BPF_WIREGUARD))
+		metrics_del_entry(is_ingress ? REASON_DECRYPTING : REASON_ENCRYPTING,
+				  is_ingress ? METRIC_INGRESS : METRIC_EGRESS);
 
 	if (is_ipv4)
 		if (is_host)
@@ -250,6 +249,13 @@ ingress_l3_to_l2_fast_redirect_check(__maybe_unused const struct __ctx_buff *ctx
 	};
 
 	test_init();
+
+	if (is_ipv4) {
+		if (is_host)
+			endpoint_v4_del_entry(TEST_IP_NODE_LOCAL);
+		else
+			endpoint_v4_del_entry(TEST_IP_LOCAL);
+	}
 
 	data = (void *)(long)ctx->data;
 	data_end = (void *)(long)ctx->data_end;
@@ -505,145 +511,145 @@ egress_l3_to_l2_fast_redirect_check(__maybe_unused const struct __ctx_buff *ctx,
 	test_finish();
 }
 
-PKTGEN("tc", "ingress_ipv4_l3_to_l2_fast_redirect_pod")
+PKTGEN(PROG_TYPE, "ingress_ipv4_l3_to_l2_fast_redirect_pod")
 int ingress_ipv4_l3_to_l2_fast_redirect_pod_pktgen(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_pktgen(ctx, true, true, false);
 }
 
-SETUP("tc", "ingress_ipv4_l3_to_l2_fast_redirect_pod")
+SETUP(PROG_TYPE, "ingress_ipv4_l3_to_l2_fast_redirect_pod")
 int ingress_ipv4_l3_to_l2_fast_redirect_pod_setup(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_setup(ctx, true, true, false);
 }
 
-CHECK("tc", "ingress_ipv4_l3_to_l2_fast_redirect_pod")
+CHECK(PROG_TYPE, "ingress_ipv4_l3_to_l2_fast_redirect_pod")
 int ingress_ipv4_l3_to_l2_fast_redirect_pod_check(__maybe_unused const struct __ctx_buff *ctx)
 {
 	return ingress_l3_to_l2_fast_redirect_check(ctx, true, false);
 }
 
-PKTGEN("tc", "ingress_ipv6_l3_to_l2_fast_redirect_pod")
+PKTGEN(PROG_TYPE, "ingress_ipv6_l3_to_l2_fast_redirect_pod")
 int ingress_ipv6_l3_to_l2_fast_redirect_pktgen(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_pktgen(ctx, true, false, false);
 }
 
-SETUP("tc", "ingress_ipv6_l3_to_l2_fast_redirect_pod")
+SETUP(PROG_TYPE, "ingress_ipv6_l3_to_l2_fast_redirect_pod")
 int ingress_ipv6_l3_to_l2_fast_redirect_pod_setup(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_setup(ctx, true, false, false);
 }
 
-CHECK("tc", "ingress_ipv6_l3_to_l2_fast_redirect_pod")
+CHECK(PROG_TYPE, "ingress_ipv6_l3_to_l2_fast_redirect_pod")
 int ingress_ipv6_l3_to_l2_fast_redirect_pod_check(__maybe_unused const struct __ctx_buff *ctx)
 {
 	return ingress_l3_to_l2_fast_redirect_check(ctx, false, false);
 }
 
-PKTGEN("tc", "egress_ipv4_l3_to_l2_fast_redirect_pod")
+PKTGEN(PROG_TYPE, "egress_ipv4_l3_to_l2_fast_redirect_pod")
 int egress_ipv4_l3_to_l2_fast_redirect_pod_pktgen(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_pktgen(ctx, false, true, false);
 }
 
-SETUP("tc", "egress_ipv4_l3_to_l2_fast_redirect_pod")
+SETUP(PROG_TYPE, "egress_ipv4_l3_to_l2_fast_redirect_pod")
 int egress_ipv4_l3_to_l2_fast_redirect_pod_setup(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_setup(ctx, false, true, false);
 }
 
-CHECK("tc", "egress_ipv4_l3_to_l2_fast_redirect_pod")
+CHECK(PROG_TYPE, "egress_ipv4_l3_to_l2_fast_redirect_pod")
 int egress_ipv4_l3_to_l2_fast_redirect_pod_check(__maybe_unused const struct __ctx_buff *ctx)
 {
 	return egress_l3_to_l2_fast_redirect_check(ctx, true, false);
 }
 
-PKTGEN("tc", "egress_ipv6_l3_to_l2_fast_redirect_pod")
+PKTGEN(PROG_TYPE, "egress_ipv6_l3_to_l2_fast_redirect_pod")
 int egress_ipv6_l3_to_l2_fast_redirect_pod_pktgen(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_pktgen(ctx, false, false, false);
 }
 
-SETUP("tc", "egress_ipv6_l3_to_l2_fast_redirect_pod")
+SETUP(PROG_TYPE, "egress_ipv6_l3_to_l2_fast_redirect_pod")
 int egress_ipv6_l3_to_l2_fast_redirect_pod_setup(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_setup(ctx, false, false, false);
 }
 
-CHECK("tc", "egress_ipv6_l3_to_l2_fast_redirect_pod")
+CHECK(PROG_TYPE, "egress_ipv6_l3_to_l2_fast_redirect_pod")
 int egress_ipv6_l3_to_l2_fast_redirect_pod_check(__maybe_unused const struct __ctx_buff *ctx)
 {
 	return egress_l3_to_l2_fast_redirect_check(ctx, false, false);
 }
 
-PKTGEN("tc", "ingress_ipv4_l3_to_l2_fast_redirect_host")
+PKTGEN(PROG_TYPE, "ingress_ipv4_l3_to_l2_fast_redirect_host")
 int ingress_ipv4_l3_to_l2_fast_redirect_host_pktgen(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_pktgen(ctx, true, true, true);
 }
 
-SETUP("tc", "ingress_ipv4_l3_to_l2_fast_redirect_host")
+SETUP(PROG_TYPE, "ingress_ipv4_l3_to_l2_fast_redirect_host")
 int ingress_ipv4_l3_to_l2_fast_redirect_host_setup(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_setup(ctx, true, true, true);
 }
 
-CHECK("tc", "ingress_ipv4_l3_to_l2_fast_redirect_host")
+CHECK(PROG_TYPE, "ingress_ipv4_l3_to_l2_fast_redirect_host")
 int ingress_ipv4_l3_to_l2_fast_redirect_host_check(__maybe_unused const struct __ctx_buff *ctx)
 {
 	return ingress_l3_to_l2_fast_redirect_check(ctx, true, true);
 }
 
-PKTGEN("tc", "ingress_ipv6_l3_to_l2_fast_redirect_host")
+PKTGEN(PROG_TYPE, "ingress_ipv6_l3_to_l2_fast_redirect_host")
 int ingress_ipv6_l3_to_l2_fast_redirect_host_pktgen(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_pktgen(ctx, true, false, true);
 }
 
-SETUP("tc", "ingress_ipv6_l3_to_l2_fast_redirect_host")
+SETUP(PROG_TYPE, "ingress_ipv6_l3_to_l2_fast_redirect_host")
 int ingress_ipv6_l3_to_l2_fast_redirect_host_setup(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_setup(ctx, true, false, true);
 }
 
-CHECK("tc", "ingress_ipv6_l3_to_l2_fast_redirect_host")
+CHECK(PROG_TYPE, "ingress_ipv6_l3_to_l2_fast_redirect_host")
 int ingress_ipv6_l3_to_l2_fast_redirect_host_check(__maybe_unused const struct __ctx_buff *ctx)
 {
 	return ingress_l3_to_l2_fast_redirect_check(ctx, false, true);
 }
 
-PKTGEN("tc", "egress_ipv4_l3_to_l2_fast_redirect_host")
+PKTGEN(PROG_TYPE, "egress_ipv4_l3_to_l2_fast_redirect_host")
 int egress_ipv4_l3_to_l2_fast_redirect_host_pktgen(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_pktgen(ctx, false, true, true);
 }
 
-SETUP("tc", "egress_ipv4_l3_to_l2_fast_redirect_host")
+SETUP(PROG_TYPE, "egress_ipv4_l3_to_l2_fast_redirect_host")
 int egress_ipv4_l3_to_l2_fast_redirect_host_setup(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_setup(ctx, false, true, true);
 }
 
-CHECK("tc", "egress_ipv4_l3_to_l2_fast_redirect_host")
+CHECK(PROG_TYPE, "egress_ipv4_l3_to_l2_fast_redirect_host")
 int egress_ipv4_l3_to_l2_fast_redirect_host_check(__maybe_unused const struct __ctx_buff *ctx)
 {
 	return egress_l3_to_l2_fast_redirect_check(ctx, true, true);
 }
 
-PKTGEN("tc", "egress_ipv6_l3_to_l2_fast_redirect_host")
+PKTGEN(PROG_TYPE, "egress_ipv6_l3_to_l2_fast_redirect_host")
 int egress_ipv6_l3_to_l2_fast_redirect_host_pktgen(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_pktgen(ctx, false, false, true);
 }
 
-SETUP("tc", "egress_ipv6_l3_to_l2_fast_redirect_host")
+SETUP(PROG_TYPE, "egress_ipv6_l3_to_l2_fast_redirect_host")
 int egress_ipv6_l3_to_l2_fast_redirect_host_setup(struct __ctx_buff *ctx)
 {
 	return l3_to_l2_fast_redirect_setup(ctx, false, false, true);
 }
 
-CHECK("tc", "egress_ipv6_l3_to_l2_fast_redirect_host")
+CHECK(PROG_TYPE, "egress_ipv6_l3_to_l2_fast_redirect_host")
 int egress_ipv6_l3_to_l2_fast_redirect_host_check(__maybe_unused const struct __ctx_buff *ctx)
 {
 	return egress_l3_to_l2_fast_redirect_check(ctx, false, true);

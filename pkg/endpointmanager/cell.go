@@ -20,6 +20,7 @@ import (
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/endpointstate"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/ipcache"
 	cilium_v2a1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 	"github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/resource"
@@ -39,13 +40,29 @@ var Cell = cell.Module(
 	"endpoint-manager",
 	"Manages the collection of local endpoints",
 
+	defaultGroup,
+	cell.Invoke(
+		registerNamespaceUpdater,
+		func(ipc *ipcache.IPCache, epMgr EndpointManager, daemonConfig *option.DaemonConfig) {
+			if daemonConfig.PolicyCIDRMatchesPods() {
+				ipc.AddCIDRSelectorAllocator(epMgr)
+			}
+		},
+	),
+)
+
+var TestCell = cell.Module(
+	"test-endpoint-manager",
+	"Manages the collection of local endpoints",
+
+	defaultGroup,
+)
+
+var defaultGroup = cell.Group(
 	cell.Config(defaultEndpointManagerConfig),
 	cell.Provide(newDefaultEndpointManager),
 	cell.Provide(endpoint.NewEndpointBuildQueue),
 	cell.ProvidePrivate(newEndpointSynchronizer),
-	cell.Invoke(
-		registerNamespaceUpdater,
-	),
 )
 
 type EndpointsLookup interface {
@@ -132,11 +149,11 @@ type EndpointManager interface {
 	// Unsubscribe from endpoint events.
 	Unsubscribe(s Subscriber)
 
-	// UpdatePolicyMaps returns a WaitGroup which is signaled upon once all endpoints
-	// have had their PolicyMaps updated against the Endpoint's desired policy state.
-	//
-	// Endpoints will wait on the 'notifyWg' parameter before updating policy maps.
-	UpdatePolicyMaps(ctx context.Context, notifyWg *sync.WaitGroup) *sync.WaitGroup
+	// UpdatePolicyMaps updates policy maps and proxy network policies for all endpoints
+	// against the Endpoint's desired policy state.
+	// Waits for the policy updates to be completed before returning.
+	// Returns an error if the proxy policy update fails, times out, or is cancelled.
+	UpdatePolicyMaps(ctx context.Context) error
 
 	// RegenerateAllEndpoints calls a setState for each endpoint and
 	// regenerates if state transaction is valid. During this process, the endpoint
@@ -149,6 +166,17 @@ type EndpointManager interface {
 	// Returns immediately.
 	TriggerRegenerateAllEndpoints()
 
+	// RegenerateAllForPolicy regenerates all endpoints against the given policy
+	// revision. Each endpoint's regeneration waits for the compute cell to
+	// publish its identity's SelectorPolicy at waitFor before proceeding.
+	// Returns immediately.
+	RegenerateAllForPolicy(waitFor uint64)
+
+	// WaitForEndpointsAtPolicyRev waits for all endpoints which existed at the time
+	// this function is called to be at a given policy revision.
+	// New endpoints appearing while waiting are ignored.
+	WaitForEndpointsAtPolicyRev(ctx context.Context, rev uint64) error
+
 	// OverrideEndpointOpts applies the given options to all endpoints.
 	OverrideEndpointOpts(om option.OptionMap)
 
@@ -160,6 +188,15 @@ type EndpointManager interface {
 	// Endpoints with security IDs in provided set will be regenerated. Otherwise, the endpoint's
 	// policy revision will be bumped to toRev.
 	UpdatePolicy(idsToRegen *set.Set[identity.NumericIdentity], fromRev, toRev uint64)
+
+	// UpdateCIDRLabels triggers identity resolution for all pod endpoints
+	// whose IPs are contained within the given prefix.
+	//
+	// If the prefix represents a single IP address (e.g. /32 or /128), it performs
+	// an optimized O(1) lookup and returns true if a matching local endpoint was found
+	// and had its identity resolution triggered.
+	// Otherwise, it performs a linear O(N) scan over all endpoints and returns false.
+	UpdateCIDRLabels(ctx context.Context, prefix netip.Prefix) bool
 }
 
 // EndpointResourceSynchronizer is an interface which synchronizes CiliumEndpoint

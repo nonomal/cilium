@@ -6,7 +6,11 @@ package endpoint
 import (
 	"log/slog"
 
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
+	"github.com/cilium/cilium/pkg/datapath/iptables"
+	"github.com/cilium/cilium/pkg/datapath/linux/bandwidth"
+	ipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/types"
+	loader "github.com/cilium/cilium/pkg/datapath/loader/types"
+	endpoint "github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/identity/cache"
 	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	"github.com/cilium/cilium/pkg/ipcache"
@@ -16,6 +20,7 @@ import (
 	monitoragent "github.com/cilium/cilium/pkg/monitor/agent"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/policy/compute"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
 
 	"github.com/cilium/hive/cell"
@@ -28,21 +33,22 @@ type EndpointParams struct {
 
 	Logger              *slog.Logger
 	EPBuildQueue        EndpointBuildQueue
-	Loader              datapath.Loader
-	Orchestrator        datapath.Orchestrator
-	CompilationLock     datapath.CompilationLock
-	BandwidthManager    datapath.BandwidthManager
-	IPTablesManager     datapath.IptablesManager
+	Loader              loader.Loader
+	Orchestrator        endpoint.Orchestrator
+	CompilationLock     loader.CompilationLock
+	BandwidthManager    bandwidth.Manager
+	IPTablesManager     iptables.Manager
 	IdentityManager     identitymanager.IDManager
 	MonitorAgent        monitoragent.Agent
 	PolicyMapFactory    policymap.Factory
 	PolicyRepo          policy.PolicyRepository
+	PolicyFetcher       compute.PolicyRecomputer
 	Allocator           cache.IdentityAllocator
 	CTMapGC             ctmap.GCRunner
 	KVStoreSynchronizer *ipcache.IPIdentitySynchronizer
-	WgConfig            wgTypes.WireguardConfig
-	IPSecConfig         datapath.IPsecConfig
-	NamedPortsGetter    NamedPortsGetter
+	WgConfig            wgTypes.Config
+	IPSecConfig         ipsec.Config
 	LxcMap              lxcmap.Map
 	LocalNodeStore      node.NodeGetter
+	IPCache             IPCache
 }

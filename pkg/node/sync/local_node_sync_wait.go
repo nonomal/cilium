@@ -23,10 +23,10 @@ import (
 func (ini *localNodeSynchronizer) retrieveNodeInformation(ctx context.Context) *nodeTypes.Node {
 	var n *nodeTypes.Node
 	waitForCIDR := func() error {
-		if option.Config.K8sRequireIPv4PodCIDR && n.IPv4AllocCIDR == nil {
+		if option.Config.K8sRequireIPv4PodCIDR && !n.IPv4AllocCIDR.IsValid() {
 			return fmt.Errorf("required IPv4 PodCIDR not available")
 		}
-		if option.Config.K8sRequireIPv6PodCIDR && n.IPv6AllocCIDR == nil {
+		if option.Config.K8sRequireIPv6PodCIDR && !n.IPv6AllocCIDR.IsValid() {
 			return fmt.Errorf("required IPv6 PodCIDR not available")
 		}
 		return nil
@@ -40,7 +40,7 @@ func (ini *localNodeSynchronizer) retrieveNodeInformation(ctx context.Context) *
 				break
 			}
 			if event.Kind == resource.Upsert {
-				no := nodeTypes.ParseCiliumNode(event.Object)
+				no := k8s.ParseCiliumNode(event.Object, ini.ClusterInfo)
 				n = &no
 				ini.Logger.Info("Retrieved node information from cilium node", logfields.NodeName, n.Name)
 				if err := waitForCIDR(); err != nil {
@@ -59,7 +59,7 @@ func (ini *localNodeSynchronizer) retrieveNodeInformation(ctx context.Context) *
 				break
 			}
 			if event.Kind == resource.Upsert {
-				n = k8s.ParseNode(ini.Logger, event.Object, source.Unspec)
+				n = k8s.ParseNode(ini.Logger, event.Object, source.Unspec, ini.ClusterInfo)
 				ini.Logger.Info("Retrieved node information from kubernetes node", logfields.NodeName, n.Name)
 				if err := waitForCIDR(); err != nil {
 					ini.Logger.Warn("Waiting for k8s node information", logfields.Error, err)
@@ -129,12 +129,12 @@ func (ini *localNodeSynchronizer) WaitForNodeInformation(ctx context.Context, st
 		}
 
 		// Set allocation CIDRs
-		if n.IPv4AllocCIDR != nil && option.Config.EnableIPv4 {
+		if n.IPv4AllocCIDR.IsValid() && option.Config.EnableIPv4 {
 			store.Update(func(ln *node.LocalNode) {
 				ln.IPv4AllocCIDR = n.IPv4AllocCIDR
 			})
 		}
-		if n.IPv6AllocCIDR != nil && option.Config.EnableIPv6 {
+		if n.IPv6AllocCIDR.IsValid() && option.Config.EnableIPv6 {
 			store.Update(func(ln *node.LocalNode) {
 				ln.IPv6AllocCIDR = n.IPv6AllocCIDR
 			})

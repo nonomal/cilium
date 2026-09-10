@@ -581,6 +581,11 @@ Users (Alphabetically)
       U: CNI
       L: https://mobilabsolutions.com/2019/01/why-we-switched-to-cilium/
 
+    * N: mogenius
+      D: mogenius is using Cilium for the mogenius platform
+      U: CNI, network-policy and network-observability
+      L: https://mogenius.com
+
     * N: MyFitnessPal
       D: MyFitnessPal trusts Cilium with high volume user traffic in AWS on self-hosted k8s clusters as the CNI plugin and in GKE with Dataplane V2
       U: Networking (CNI, Maglev, kube-proxy replacement, local redirect policy),  Observability (Network metrics with Hubble, DNS proxy, service maps, policy troubleshooting) and Security (Network Policy)
@@ -636,6 +641,12 @@ Users (Alphabetically)
       L: https://www.nutanix.com/products/kubernetes-management-platform
       Q: @tuxtof
 
+    * N: OpenChoreo
+      D: OpenChoreo uses Cilium to enforce zero-trust network security through CiliumNetworkPolicies and provide advanced network observability with Hubble.
+      U: CNI, CiliumNetworkPolicy, Hubble, Layer 7 visibility via Cilium Envoy
+      L: https://openchoreo.dev/ecosystem/item/networking-cilium/
+      Q: @akila-i
+
     * N: Outscale Kubernetes as a Service (OKS)
       D: Cilium is the default Container Network Interface (CNI) used by OUTSCALE on all clusters provisioned through its Kubernetes offering, OKS.
       U: CNI, Hubble, CiliumNetworkPolicy, kube-proxy replacement, eBPF 
@@ -651,6 +662,12 @@ Users (Alphabetically)
       L: https://www.ovhcloud.com/
       Q: @scraly
 
+    * N: Pagali Payments Service
+      D: Pagali is using Cilium on AWS EKS (aws-cni chaining) for our own services.
+      U: Networking, Observability, Security, Service Mesh (GAMMA), Gateway API
+      L: https://pagali.com.br
+      Q: github (@dverzolla, @udleinati)
+      
     * N: Palantir Technologies Inc.
       D: Palantir is using Cilium as their main CNI plugin in all major cloud providers [AWS/Azure/GCP] (self hosted k8s).
       U: ENI networking, L3/L4 policies, FQDN based policy, FQDN filtering, IPSec
@@ -661,6 +678,12 @@ Users (Alphabetically)
       U: CNI, Networking, Network policy, Security, Hubble UI
       L: https://blog.palark.com/why-cilium-for-kubernetes-networking/
       Q: @shurup
+
+    * N: PayPal
+      D: PayPal is using Cilium as the CNI for its self-managed Kubernetes clusters.
+      U: CNI, Multi-pool IPAM, BGP, kube-proxy replacement, ipmasq, native routing
+      L: [PayPal](https://www.paypal.com/in/home)
+      Q: @dsanthosh
 
     * N: Pionative
       D: Pionative supplies all its clients across cloud providers with
@@ -954,6 +977,11 @@ Users (Alphabetically)
       D: Veepee is using Cilium on their on-premise Kubernetes clusters, hosting majority of their applications.
       U. CNI, BGP, eBPF, Hubble, DirectRouting (via kube-router)
       Q: @nerzhul
+
+    * N: Verbano Tech
+      D: Verbano Tech runs Cilium as the CNI for a production K3s deployment on a node that coexists with Docker Compose services.
+      U: CNI, Hubble, Kubernetes Services with eBPF per-packet ClusterIP load-balancing
+      L: https://verbano.tech/en/engineering/k3s-cilium-docker-compose-clusterip-timeouts/
 
     * N: Vietnam Post Cloud
       D: Vietnnam Post Cloud is using Cilium in their production, staging, and development clusters

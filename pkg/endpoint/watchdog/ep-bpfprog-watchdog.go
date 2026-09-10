@@ -13,8 +13,8 @@ import (
 	"github.com/spf13/pflag"
 
 	"github.com/cilium/cilium/pkg/datapath/loader"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/endpoint/types"
 	"github.com/cilium/cilium/pkg/endpointmanager"
 	"github.com/cilium/cilium/pkg/endpointstate"
 	"github.com/cilium/cilium/pkg/logging/logfields"
@@ -43,7 +43,7 @@ type epBPFProgWatchdogParams struct {
 	RestorerPromise promise.Promise[endpointstate.Restorer]
 
 	EndpointManager endpointmanager.EndpointManager
-	Orchestrator    datapath.Orchestrator
+	Orchestrator    types.Orchestrator
 }
 
 // Cell triggers a job to ensure device tc programs remain loaded.
@@ -90,7 +90,7 @@ type endpointBPFProgWatchdog struct {
 	logger *slog.Logger
 
 	endpointManager endpointmanager.EndpointManager
-	orchestrator    datapath.Orchestrator
+	orchestrator    types.Orchestrator
 }
 
 func (r *endpointBPFProgWatchdog) checkEndpointBPFPrograms(ctx context.Context) error {
@@ -102,7 +102,7 @@ func (r *endpointBPFProgWatchdog) checkEndpointBPFPrograms(ctx context.Context) 
 			continue
 		}
 
-		if ep.IsProperty(endpoint.PropertyWithouteBPFDatapath) {
+		if ep.IsProperty(types.PropertyWithouteBPFDatapath) {
 			// Skip Endpoints without BPF datapath
 			continue
 		}
@@ -119,10 +119,12 @@ func (r *endpointBPFProgWatchdog) checkEndpointBPFPrograms(ctx context.Context) 
 			return fmt.Errorf("failed to assert if endpoint BPF programs need to be reloaded: %w", err)
 		}
 
-		// We've detected missing bpf progs for this endpoint.
-		// Trigger bpf progs reload - but first fetch all endpoints that
-		// don't have the programs loaded.
-		if !loaded {
+		// Collect all endpoints without the programs loaded before triggering
+		// the reload below. An Endpoint being deleted also detaches the programs
+		// while the host device still exists, so check if the Endpoint is still
+		// alive. Both the StateReady check above and loaded were fetched earlier.
+		// Otherwise, we will false warn of programs being unloaded.
+		if !loaded && ep.IsAlive() {
 			epsWithoutProgramsLoaded[ep.ID] = ep.GetK8sNamespaceAndCEPName()
 		}
 	}

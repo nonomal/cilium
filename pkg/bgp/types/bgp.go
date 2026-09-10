@@ -5,12 +5,14 @@ package types
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"strings"
 	"time"
 
-	"github.com/osrg/gobgp/v3/pkg/packet/bgp"
+	"github.com/osrg/gobgp/v4/pkg/packet/bgp"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/cilium/cilium/api/v1/models"
 )
@@ -18,7 +20,8 @@ import (
 // BGP metric labels
 const (
 	LabelClusterConfig = "bgp_cluster_config"
-	LabelVRouter       = "vrouter"
+	LabelName          = "instance_name"
+	LabelLocalAsn      = "local_asn"
 	LabelNeighbor      = "neighbor"
 	LabelNeighborAsn   = "neighbor_asn"
 	LabelAfi           = "afi"
@@ -52,15 +55,27 @@ type StateNotificationCh chan struct{}
 // but only contains minimal fields required for Cilium usecases.
 type Path struct {
 	// read/write
-	NLRI           bgp.AddrPrefixInterface
+	NLRI           bgp.NLRI
 	PathAttributes []bgp.PathAttributeInterface
-	Family         Family // can be empty, in which case it will be inferred from NLRI
+	Family         Family
 
 	// readonly
-	AgeNanoseconds int64 // time duration in nanoseconds since the Path was created
-	Best           bool
-	UUID           []byte // path identifier in underlying implementation
-	SourceASN      uint32
+	CreatedAt time.Time // time when the Path was created
+	Best      bool
+	UUID      []byte // path identifier in underlying implementation
+	SourceASN uint32
+}
+
+// Age returns the elapsed duration since the Path was created.
+func (p *Path) Age() time.Duration {
+	if p.CreatedAt.IsZero() {
+		return 0
+	}
+	age := time.Since(p.CreatedAt)
+	if age < 0 {
+		return 0
+	}
+	return age
 }
 
 // Neighbor is an object representing a single BGP neighbor. It is an analogue
@@ -142,29 +157,98 @@ type ResetAllNeighborsRequest struct {
 // PeerState contains status information for a BGP peer
 type PeerState struct {
 	// Name of the peer
-	Name string
+	Name string `json:"name,omitempty"`
 
 	// Address of the peer
-	Address netip.Addr
+	Address netip.Addr `json:"peer-address,omitempty"`
+
+	// TCP port number of peer
+	// Maximum: 65535
+	// Minimum: 1
+	Port int64 `json:"peer-port,omitempty"`
+
+	// Peer AS Number
+	PeerAsn int64 `json:"peer-asn,omitempty"`
+
+	// Local AS Number
+	LocalAsn int64 `json:"local-asn,omitempty"`
 
 	// BGP peer state
-	SessionState SessionState
+	SessionState SessionState `json:"session-state,omitempty"`
 
 	// The rest of the fields are only valid if SessionState is Established
 
 	// Time since the BGP session was established
-	Uptime time.Duration
+	Uptime time.Duration `json:"uptime-nanoseconds,omitempty"`
 
 	// BGP peer address family states. All configured address families are present here.
-	Families []PeerFamilyState
+	Families []PeerFamilyState `json:"families"`
+
+	// Contains information for peer timers settings.
+	Timers PeerTimers `json:"timers"`
+
+	// Time To Live (TTL) value used in BGP packets sent to the eBGP neighbor.
+	// 1 implies that eBGP multi-hop feature is disabled (only a single hop is allowed).
+	//
+	EbgpMultihopTTL int64 `json:"ebgp-multihop-ttl,omitempty"`
+
+	// Graceful restart capability
+	GracefulRestart BgpGracefulRestart `json:"graceful-restart,omitempty"`
+
+	// Capabilities announced by the local peer
+	LocalCapabilities []bgp.ParameterCapabilityInterface `json:"local-capabilities"`
+
+	// Capabilities announced by the remote peer
+	RemoteCapabilities []bgp.ParameterCapabilityInterface `json:"remote-capabilities"`
+
+	// Set when a TCP password is configured for communications with this peer
+	TCPPasswordEnabled bool `json:"tcp-password-enabled,omitempty"`
+}
+
+// PeerTimers contains information for peer timers settings.
+type PeerTimers struct {
+	// Applied initial value for the BGP HoldTimer (RFC 4271, Section 4.2)
+	// The applied value holds the value that is in effect on the current BGP session.
+	//
+	AppliedHoldTime time.Duration `json:"applied-hold-nanoseconds,omitempty"`
+
+	// Applied initial value for the BGP KeepaliveTimer (RFC 4271, Section 8)
+	// The applied value holds the value that is in effect on the current BGP session.
+	//
+	AppliedKeepAliveTime time.Duration `json:"applied-keep-alive-nanoseconds,omitempty"`
+
+	// Configured initial value for the BGP HoldTimer (RFC 4271, Section 4.2)
+	// The configured value will be used for negotiation with the peer during the BGP session establishment.
+	//
+	ConfiguredHoldTime time.Duration `json:"configured-hold-nanoseconds,omitempty"`
+
+	// Configured initial value for the BGP KeepaliveTimer (RFC 4271, Section 8)
+	// The applied value may be different than the configured value, as it depends on the negotiated hold time interval.
+	//
+	ConfiguredKeepAliveTime time.Duration `json:"configured-keep-alive-nanoseconds,omitempty"`
+
+	// Initial value for the BGP ConnectRetryTimer (RFC 4271, Section 8)
+	ConnectRetryTime time.Duration `json:"connect-retry-nanoseconds,omitempty"`
 }
 
 // PeerFamilyState contains status information for a specific address family.
 type PeerFamilyState struct {
 	Family
-	ReceivedRoutes   uint64
-	AcceptedRoutes   uint64
-	AdvertisedRoutes uint64
+	ReceivedRoutes   uint64 `json:"received,omitempty"`
+	AcceptedRoutes   uint64 `json:"accepted,omitempty"`
+	AdvertisedRoutes uint64 `json:"advertised,omitempty"`
+}
+
+// BgpGracefulRestart BGP graceful restart parameters negotiated with the peer.
+type BgpGracefulRestart struct {
+	// When set, graceful restart capability is negotiated for all AFI/SAFIs of
+	// this peer.
+	Enabled bool `json:"enabled,omitempty"`
+
+	// This is the time advertised to peer for the BGP session to be re-established
+	// after a restart. After this period, peer will remove stale routes.
+	// (RFC 4724 section 4.2)
+	RestartTime time.Duration `json:"restart-time-nanoseconds,omitempty"`
 }
 
 // PathRequest contains parameters for advertising or withdrawing a Path
@@ -206,6 +290,20 @@ func (t RoutePolicyMatchType) MarshalJSON() ([]byte, error) {
 
 func (t RoutePolicyMatchType) MarshalYAML() (any, error) {
 	return t.String(), nil
+}
+
+func (t *RoutePolicyMatchType) UnmarshalYAML(value *yaml.Node) error {
+	switch strings.ToLower(value.Value) {
+	case "any":
+		*t = RoutePolicyMatchAny
+	case "all":
+		*t = RoutePolicyMatchAll
+	case "invert":
+		*t = RoutePolicyMatchInvert
+	default:
+		return fmt.Errorf("unknown route policy match type %q", value.Value)
+	}
+	return nil
 }
 
 // RoutePolicyNeighborMatch matches BGP neighbor IP address with the provided IPs using the provided match logic type.
@@ -353,6 +451,20 @@ func (a RoutePolicyAction) MarshalYAML() (any, error) {
 	return a.String(), nil
 }
 
+func (a *RoutePolicyAction) UnmarshalYAML(value *yaml.Node) error {
+	switch strings.ToLower(value.Value) {
+	case "none":
+		*a = RoutePolicyActionNone
+	case "accept":
+		*a = RoutePolicyActionAccept
+	case "reject":
+		*a = RoutePolicyActionReject
+	default:
+		return fmt.Errorf("unknown route policy action %q", value.Value)
+	}
+	return nil
+}
+
 // RoutePolicyActions define policy actions taken on route matched by a routing policy.
 //
 // +deepequal-gen=true
@@ -388,6 +500,8 @@ type RoutePolicyActionNextHop struct {
 //
 // +deepequal-gen=true
 type RoutePolicyStatement struct {
+	// Name of the statement. Should be unique within its route policy. Will be auto-generated if not set.
+	Name string
 	// Conditions of the statement. If ALL of them match a route, the Actions are taken on the route.
 	Conditions RoutePolicyConditions
 	// Actions define actions taken on a matched route.
@@ -421,6 +535,18 @@ func (t RoutePolicyType) MarshalJSON() ([]byte, error) {
 
 func (t RoutePolicyType) MarshalYAML() (any, error) {
 	return t.String(), nil
+}
+
+func (t *RoutePolicyType) UnmarshalYAML(value *yaml.Node) error {
+	switch strings.ToLower(value.Value) {
+	case "export":
+		*t = RoutePolicyTypeExport
+	case "import":
+		*t = RoutePolicyTypeImport
+	default:
+		return fmt.Errorf("unknown route policy type %q", value.Value)
+	}
+	return nil
 }
 
 // RoutePolicy represents a BGP routing policy, also called "route map" in some BGP implementations.
@@ -473,8 +599,8 @@ type ServerParameters struct {
 //
 // +deepequal-gen=true
 type Family struct {
-	Afi  Afi
-	Safi Safi
+	Afi  Afi  `json:"afi,omitempty"`
+	Safi Safi `json:"safi,omitempty"`
 }
 
 func (f Family) String() string {

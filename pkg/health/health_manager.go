@@ -16,9 +16,10 @@ import (
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/daemon/infraendpoints"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/connector"
 	"github.com/cilium/cilium/pkg/datapath/linux/bigtcp"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
+	loader "github.com/cilium/cilium/pkg/datapath/loader/types"
 	"github.com/cilium/cilium/pkg/endpoint"
 	endpointcreator "github.com/cilium/cilium/pkg/endpoint/creator"
 	"github.com/cilium/cilium/pkg/endpointmanager"
@@ -56,10 +57,10 @@ type ciliumHealthManager struct {
 	logger           *slog.Logger
 	healthSpec       *healthApi.Spec
 	sysctl           sysctl.Sysctl
-	loader           datapath.Loader
-	connectorConfig  datapath.ConnectorConfig
+	loader           loader.Loader
+	connectorConfig  connector.Config
 	mtuConfig        mtu.MTU
-	bigTCPConfig     *bigtcp.Configuration
+	bigTCPConfig     bigtcp.Config
 	endpointCreator  endpointcreator.EndpointCreator
 	endpointManager  endpointmanager.EndpointManager
 	k8sClientSet     k8sClient.Clientset
@@ -81,10 +82,10 @@ type ciliumHealthParams struct {
 	JobGroup               job.Group
 	HealthSpec             *healthApi.Spec
 	Sysctl                 sysctl.Sysctl
-	Loader                 datapath.Loader
-	ConnectorConfig        datapath.ConnectorConfig
+	Loader                 loader.Loader
+	ConnectorConfig        connector.Config
 	MtuConfig              mtu.MTU
-	BigTCPConfig           *bigtcp.Configuration
+	BigTCPConfig           bigtcp.Config
 	EndpointCreator        endpointcreator.EndpointCreator
 	EndpointManager        endpointmanager.EndpointManager
 	EndpointRestorePromise promise.Promise[endpointstate.Restorer]
@@ -245,10 +246,10 @@ func (h *ciliumHealthManager) cleanupHealthEndpoint(ctx context.Context) error {
 	// Clean up agent resources
 	healthIPv4 := ln.IPv4HealthIP
 	healthIPv6 := ln.IPv6HealthIP
-	if healthIPv4 != nil {
+	if healthIPv4.IsValid() {
 		ep = h.endpointManager.LookupIPv4(healthIPv4.String())
 	}
-	if ep == nil && healthIPv6 != nil {
+	if ep == nil && healthIPv6.IsValid() {
 		ep = h.endpointManager.LookupIPv6(healthIPv6.String())
 	}
 	if ep == nil {

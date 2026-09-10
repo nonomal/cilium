@@ -15,9 +15,9 @@ import (
 
 	"github.com/cilium/cilium/daemon/cmd/cni"
 	"github.com/cilium/cilium/daemon/k8s"
+	ipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/types"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
-	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
@@ -47,7 +47,7 @@ type MTU interface {
 type mtuParams struct {
 	cell.In
 
-	IPsec        types.IPsecAgent
+	IPsec        ipsec.Agent
 	CNI          cni.CNIConfigManager
 	TunnelConfig tunnel.Config
 
@@ -58,7 +58,7 @@ type mtuParams struct {
 	Log             *slog.Logger
 	DaemonConfig    *option.DaemonConfig
 	LocalCiliumNode k8s.LocalCiliumNodeResource
-	WgConfig        wgTypes.WireguardConfig
+	WgConfig        wgTypes.Config
 
 	Config Config
 }
@@ -131,7 +131,7 @@ func newForCell(lc cell.Lifecycle, p mtuParams, cc Config) (MTU, error) {
 	c := &Configuration{}
 	lc.Append(cell.Hook{
 		OnStart: func(ctx cell.HookContext) error {
-			tunnelOverIPv6 := option.Config.RoutingMode == option.RoutingModeTunnel &&
+			tunnelOverIPv6 := option.Config.TunnelingEnabled() &&
 				p.TunnelConfig.UnderlayProtocol() == tunnel.IPv6
 			*c = NewConfiguration(
 				p.IPsec.AuthKeySize(),
@@ -204,13 +204,13 @@ type LatestMTUGetter struct {
 
 func (m *LatestMTUGetter) GetDeviceMTU() int {
 	rtx := m.db.ReadTxn()
-	mtu, _, _ := m.tbl.Get(rtx, MTURouteIndex.Query(DefaultPrefixV4))
+	mtu, _, _ := m.tbl.Get(rtx, MTURouteByPrefix(DefaultPrefixV4))
 	return mtu.DeviceMTU
 }
 
 func (m *LatestMTUGetter) GetRouteMTU() int {
 	rtx := m.db.ReadTxn()
-	mtu, _, _ := m.tbl.Get(rtx, MTURouteIndex.Query(DefaultPrefixV4))
+	mtu, _, _ := m.tbl.Get(rtx, MTURouteByPrefix(DefaultPrefixV4))
 	return mtu.RouteMTU
 }
 

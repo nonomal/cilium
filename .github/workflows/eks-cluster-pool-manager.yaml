@@ -22,7 +22,7 @@ permissions:
 
 env:
   # renovate: datasource=github-releases depName=eksctl-io/eksctl
-  eksctl_version: v0.223.0
+  eksctl_version: v0.230.0
 
 jobs:
   generate-cleanup-matrix:
@@ -34,7 +34,7 @@ jobs:
       empty: ${{ steps.set-matrix.outputs.empty }}
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -62,6 +62,13 @@ jobs:
           echo "empty=false" >> $GITHUB_OUTPUT
 
   cleanup-old-clusters:
+    permissions:
+      # To be able to trigger eks-cluster-delete.yaml workflow
+      actions: write
+      # To be able to access the repository with actions/checkout
+      contents: read
+      # To be able to request the JWT from GitHub's OIDC provider
+      id-token: write
     name: Cleanup clusters older than 6 hours
     runs-on: ubuntu-24.04
     needs: generate-cleanup-matrix
@@ -72,26 +79,22 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Install eksctl CLI
-        run: |
-          curl -LO "https://github.com/eksctl-io/eksctl/releases/download/${{ env.eksctl_version }}/eksctl_$(uname -s)_amd64.tar.gz"
-          sudo tar -xzvf "eksctl_$(uname -s)_amd64.tar.gz" -C /usr/bin
-          rm "eksctl_$(uname -s)_amd64.tar.gz"
-
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}
+
 
       - name: List and delete old clusters
         env:
           REGION: ${{ matrix.region }}
           MAX_AGE_HOURS: 6
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
 
@@ -163,7 +166,7 @@ jobs:
               S3_BUCKET="${{ format('{0}-{1}-eks-kubeconfig-pool', github.repository_owner, github.event.repository.name) }}"
               if [ -n "${S3_BUCKET}" ]; then
                 echo "Checking if kubeconfig for cluster ${cluster} exists in S3 bucket ${S3_BUCKET}"
-                KUBECONFIG_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/kubeconfig-pool/" --recursive --region ${REGION} | grep -c "${cluster}-" || echo "0")
+                KUBECONFIG_EXISTS=$(aws s3 ls "s3://${S3_BUCKET}/kubeconfig-pool/" --recursive --region ${REGION} | grep -c "${cluster}-" || true)
 
                 if [ "${KUBECONFIG_EXISTS}" -eq "0" ]; then
                   echo "Kubeconfig for cluster ${cluster} not found in S3 pool - cluster is being used, skipping deletion"
@@ -177,9 +180,12 @@ jobs:
                 aws s3 rm "s3://${S3_BUCKET}/kubeconfig-pool/" --recursive --exclude "*" --include "${cluster}-*" --region ${REGION} || true
               fi
 
-              # Delete the cluster
-              eksctl delete cluster --name ${cluster} --region ${REGION} --wait || {
-                echo "Failed to delete cluster ${cluster}, continuing..."
+              # Trigger the eks-cluster-delete workflow to delete the cluster
+              echo "Triggering eks-cluster-delete workflow for cluster ${cluster} in region ${REGION}"
+              gh workflow run eks-cluster-delete.yaml \
+                -f cluster_name="${cluster}" \
+                -f region="${REGION}" || {
+                echo "Failed to trigger delete workflow for cluster ${cluster}, continuing..."
               }
             else
               echo "Cluster ${cluster} is not old enough to delete (age: ${CLUSTER_AGE_HOURS} hours, threshold: ${MAX_AGE_HOURS} hours)"
@@ -197,7 +203,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}
@@ -243,7 +249,7 @@ jobs:
       empty: ${{ steps.set-matrix.outputs.empty }}
     steps:
       - name: Checkout context ref (trusted)
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -265,19 +271,36 @@ jobs:
           jq '{ "include": [ .include[] | select(.default) ] }' eks.json > /tmp/eks-defaults.json
           jq '{ "include": [ .include[] | select(.default) ] }' aws-cni.json > /tmp/aws-cni-defaults.json
 
-          # Expand matrix with different addon configurations
+          # Expand matrix with different addon configurations.
+          #
+          # The "zones" field MUST match what the conformance-eks.yaml /
+          # conformance-aws-cni.yaml consumers compute from the region, because
+          # setup-eks-cluster hashes "<addons> <zones>" into the pool key. If
+          # the pool clusters are created with a different zone set than the PR
+          # jobs search for, the pool key never matches, every PR leg creates a
+          # brand-new (NAT-gateway-consuming) cluster instead of claiming a
+          # pooled one, and the region eventually hits its NAT gateway quota.
+          # Consumer derivation (keep in sync): ZONE_1 = <region>a for us-west-1
+          # (us-west-1b rejects subnets), else <region>b; ZONE_2 = <region>c.
           cat > /tmp/expand-addons.jq << 'EOF'
+          def zones: (if .region == "us-west-1" then .region + "a" else .region + "b" end) + " " + .region + "c";
           {
             "include": [
               # all-addons configuration from aws-cni versions
               (.aws_cni.include[] | . + {
                 "addons": "coredns kube-proxy vpc-cni",
-                "addons_name": "all-addons"
+                "addons_name": "all-addons",
+                "zones": (. | zones),
+                "az_cluster": (if .region == "us-west-1" then .region + "a" else .region + "b" end),
+                "az_external": (.region + "c")
               }),
               # coredns-kubeproxy configuration from eks versions
               (.eks.include[] | . + {
                 "addons": "coredns kube-proxy",
-                "addons_name": "coredns-kubeproxy"
+                "addons_name": "coredns-kubeproxy",
+                "zones": (. | zones),
+                "az_cluster": (if .region == "us-west-1" then .region + "a" else .region + "b" end),
+                "az_external": (.region + "c")
               })
             ]
           }
@@ -303,7 +326,7 @@ jobs:
       fail-fast: false
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}
@@ -370,18 +393,18 @@ jobs:
       fail-fast: false
     steps:
       - name: Checkout code
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Install eksctl CLI
         run: |
-          curl -LO "https://github.com/eksctl-io/eksctl/releases/download/${{ env.eksctl_version }}/eksctl_$(uname -s)_amd64.tar.gz"
+          curl -fL --retry 5 --retry-all-errors --retry-delay 3 -O "https://github.com/eksctl-io/eksctl/releases/download/${{ env.eksctl_version }}/eksctl_$(uname -s)_amd64.tar.gz"
           sudo tar -xzvf "eksctl_$(uname -s)_amd64.tar.gz" -C /usr/bin
           rm "eksctl_$(uname -s)_amd64.tar.gz"
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}
@@ -504,6 +527,9 @@ jobs:
           owner: "eks-cluster-pool-manager"
           version: ${{ matrix.version }}
           spot: false
+          nodes_without_cilium: 2
+          az_cluster: ${{ matrix.az_cluster }}
+          az_external: ${{ matrix.az_external }}
 
       - name: Upload kubeconfig to S3 pool
         if: ${{ steps.check-pool.outputs.should_create == 'true' }}
@@ -623,7 +649,7 @@ jobs:
       matrix: ${{ fromJson(needs.generate-cleanup-matrix.outputs.matrix) }}
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
+        uses: aws-actions/configure-aws-credentials@cbe3b392738ccf3f987d68400dafcf4b0624a56c # v6.2.4
         with:
           role-to-assume: ${{ secrets.AWS_PR_ASSUME_ROLE }}
           aws-region: ${{ matrix.region }}

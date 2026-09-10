@@ -108,7 +108,7 @@ static __always_inline int tc_nodeport_snat_conflict_assert_ipv6(void)
  * within the endpoint map to an external host, subjecting it to the nat fwd
  * path.
  */
-PKTGEN("tc", "tc_nodeport_snat_conflict_host_ipv4")
+PKTGEN(PROG_TYPE, "tc_nodeport_snat_conflict_host_ipv4")
 int tc_nodeport_snat_conflict_host_ipv4_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
@@ -132,7 +132,7 @@ int tc_nodeport_snat_conflict_host_ipv4_pktgen(struct __ctx_buff *ctx)
 	return 0;
 }
 
-SETUP("tc", "tc_nodeport_snat_conflict_host_ipv4")
+SETUP(PROG_TYPE, "tc_nodeport_snat_conflict_host_ipv4")
 int tc_nodeport_snat_conflict_host_ipv4_setup(struct __ctx_buff *ctx)
 {
 	endpoint_v4_add_entry(NODE_IP, 0, 0, ENDPOINT_F_HOST, HOST_ID,
@@ -143,10 +143,13 @@ int tc_nodeport_snat_conflict_host_ipv4_setup(struct __ctx_buff *ctx)
 	return netdev_send_packet(ctx);
 }
 
-CHECK("tc", "tc_nodeport_snat_conflict_host_ipv4")
+CHECK(PROG_TYPE, "tc_nodeport_snat_conflict_host_ipv4")
 int tc_nodeport_snat_conflict_host_ipv4_check(struct __ctx_buff *ctx)
 {
 	test_init();
+
+	endpoint_v4_del_entry(NODE_IP);
+
 	assert(tc_nodeport_snat_conflict_assert_status(ctx));
 	assert(tc_nodeport_snat_conflict_assert_ipv4());
 	test_finish();
@@ -156,7 +159,7 @@ int tc_nodeport_snat_conflict_host_ipv4_check(struct __ctx_buff *ctx)
  * IPv6: Create a request from a host process or host-networked pod from a host IP
  * within the endpoint map to an external host, subjecting it to the nat fwd path.
  */
-PKTGEN("tc", "tc_nodeport_snat_conflict_host_ipv6")
+PKTGEN(PROG_TYPE, "tc_nodeport_snat_conflict_host_ipv6")
 int tc_nodeport_snat_conflict_host_ipv6_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
@@ -180,7 +183,7 @@ int tc_nodeport_snat_conflict_host_ipv6_pktgen(struct __ctx_buff *ctx)
 	return 0;
 }
 
-SETUP("tc", "tc_nodeport_snat_conflict_host_ipv6")
+SETUP(PROG_TYPE, "tc_nodeport_snat_conflict_host_ipv6")
 int tc_nodeport_snat_conflict_host_ipv6_setup(struct __ctx_buff *ctx)
 {
 	union v6addr node_ip6 = NODE_IP6_ADDR;
@@ -193,7 +196,7 @@ int tc_nodeport_snat_conflict_host_ipv6_setup(struct __ctx_buff *ctx)
 	return netdev_send_packet(ctx);
 }
 
-CHECK("tc", "tc_nodeport_snat_conflict_host_ipv6")
+CHECK(PROG_TYPE, "tc_nodeport_snat_conflict_host_ipv6")
 int tc_nodeport_snat_conflict_host_ipv6_check(struct __ctx_buff *ctx)
 {
 	test_init();
@@ -206,7 +209,7 @@ int tc_nodeport_snat_conflict_host_ipv6_check(struct __ctx_buff *ctx)
  * Create a non-transparent request from the egress proxy sourced from a node
  * IP, subjecting it to the nat fwd path.
  */
-PKTGEN("tc", "tc_nodeport_snat_conflict_egressproxy_ipv4")
+PKTGEN(PROG_TYPE, "tc_nodeport_snat_conflict_egressproxy_ipv4")
 int tc_nodeport_snat_conflict_egressproxy_ipv4_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
@@ -230,7 +233,7 @@ int tc_nodeport_snat_conflict_egressproxy_ipv4_pktgen(struct __ctx_buff *ctx)
 	return 0;
 }
 
-SETUP("tc", "tc_nodeport_snat_conflict_egressproxy_ipv4")
+SETUP(PROG_TYPE, "tc_nodeport_snat_conflict_egressproxy_ipv4")
 int tc_nodeport_snat_conflict_egressproxy_ipv4_setup(struct __ctx_buff *ctx)
 {
 	endpoint_v4_add_entry(NODE_IP, 0, 0, ENDPOINT_F_HOST, HOST_ID,
@@ -241,10 +244,13 @@ int tc_nodeport_snat_conflict_egressproxy_ipv4_setup(struct __ctx_buff *ctx)
 	return netdev_send_packet(ctx);
 }
 
-CHECK("tc", "tc_nodeport_snat_conflict_egressproxy_ipv4")
+CHECK(PROG_TYPE, "tc_nodeport_snat_conflict_egressproxy_ipv4")
 int tc_nodeport_snat_conflict_egressproxy_ipv4_check(struct __ctx_buff *ctx)
 {
 	test_init();
+
+	endpoint_v4_del_entry(NODE_IP);
+
 	assert(tc_nodeport_snat_conflict_assert_status(ctx));
 	assert(tc_nodeport_snat_conflict_assert_ipv4());
 	test_finish();
@@ -254,7 +260,7 @@ int tc_nodeport_snat_conflict_egressproxy_ipv4_check(struct __ctx_buff *ctx)
  * IPv6: Create a non-transparent request from the egress proxy sourced from a
  * node IP, subjecting it to the nat fwd path.
  */
-PKTGEN("tc", "tc_nodeport_snat_conflict_egressproxy_ipv6")
+PKTGEN(PROG_TYPE, "tc_nodeport_snat_conflict_egressproxy_ipv6")
 int tc_nodeport_snat_conflict_egressproxy_ipv6_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
@@ -278,7 +284,7 @@ int tc_nodeport_snat_conflict_egressproxy_ipv6_pktgen(struct __ctx_buff *ctx)
 	return 0;
 }
 
-SETUP("tc", "tc_nodeport_snat_conflict_egressproxy_ipv6")
+SETUP(PROG_TYPE, "tc_nodeport_snat_conflict_egressproxy_ipv6")
 int tc_nodeport_snat_conflict_egressproxy_ipv6_setup(struct __ctx_buff *ctx)
 {
 	union v6addr node_ip6 = NODE_IP6_ADDR;
@@ -291,7 +297,7 @@ int tc_nodeport_snat_conflict_egressproxy_ipv6_setup(struct __ctx_buff *ctx)
 	return netdev_send_packet(ctx);
 }
 
-CHECK("tc", "tc_nodeport_snat_conflict_egressproxy_ipv6")
+CHECK(PROG_TYPE, "tc_nodeport_snat_conflict_egressproxy_ipv6")
 int tc_nodeport_snat_conflict_egressproxy_ipv6_check(struct __ctx_buff *ctx)
 {
 	test_init();
@@ -306,7 +312,7 @@ int tc_nodeport_snat_conflict_egressproxy_ipv6_check(struct __ctx_buff *ctx)
  *
  * We expect no conntrack to be created in this scenario.
  */
-PKTGEN("tc", "tc_nodeport_snat_conflict_pod_ipv4")
+PKTGEN(PROG_TYPE, "tc_nodeport_snat_conflict_pod_ipv4")
 int tc_nodeport_snat_conflict_pod_ipv4_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
@@ -330,7 +336,7 @@ int tc_nodeport_snat_conflict_pod_ipv4_pktgen(struct __ctx_buff *ctx)
 	return 0;
 }
 
-SETUP("tc", "tc_nodeport_snat_conflict_pod_ipv4")
+SETUP(PROG_TYPE, "tc_nodeport_snat_conflict_pod_ipv4")
 int tc_nodeport_snat_conflict_pod_ipv4_setup(struct __ctx_buff *ctx)
 {
 	endpoint_v4_add_entry(POD_IP, 0, 0, 0, POD_SEC_IDENTITY,
@@ -341,7 +347,7 @@ int tc_nodeport_snat_conflict_pod_ipv4_setup(struct __ctx_buff *ctx)
 	return netdev_send_packet(ctx);
 }
 
-CHECK("tc", "tc_nodeport_snat_conflict_pod_ipv4")
+CHECK(PROG_TYPE, "tc_nodeport_snat_conflict_pod_ipv4")
 int tc_nodeport_snat_conflict_pod_ipv4_check(struct __ctx_buff *ctx)
 {
 	struct ipv4_ct_tuple tuple = {
@@ -354,6 +360,9 @@ int tc_nodeport_snat_conflict_pod_ipv4_check(struct __ctx_buff *ctx)
 	};
 
 	test_init();
+
+	endpoint_v4_del_entry(POD_IP);
+
 	assert(tc_nodeport_snat_conflict_assert_status(ctx));
 
 	/* Pod traffic should NOT create a conntrack entry */
@@ -370,7 +379,7 @@ int tc_nodeport_snat_conflict_pod_ipv4_check(struct __ctx_buff *ctx)
  *
  * We expect no conntrack to be created in this scenario.
  */
-PKTGEN("tc", "tc_nodeport_snat_conflict_pod_ipv6")
+PKTGEN(PROG_TYPE, "tc_nodeport_snat_conflict_pod_ipv6")
 int tc_nodeport_snat_conflict_pod_ipv6_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
@@ -394,7 +403,7 @@ int tc_nodeport_snat_conflict_pod_ipv6_pktgen(struct __ctx_buff *ctx)
 	return 0;
 }
 
-SETUP("tc", "tc_nodeport_snat_conflict_pod_ipv6")
+SETUP(PROG_TYPE, "tc_nodeport_snat_conflict_pod_ipv6")
 int tc_nodeport_snat_conflict_pod_ipv6_setup(struct __ctx_buff *ctx)
 {
 	union v6addr pod_ip6 = POD_IP6_ADDR;
@@ -407,7 +416,7 @@ int tc_nodeport_snat_conflict_pod_ipv6_setup(struct __ctx_buff *ctx)
 	return netdev_send_packet(ctx);
 }
 
-CHECK("tc", "tc_nodeport_snat_conflict_pod_ipv6")
+CHECK(PROG_TYPE, "tc_nodeport_snat_conflict_pod_ipv6")
 int tc_nodeport_snat_conflict_pod_ipv6_check(struct __ctx_buff *ctx)
 {
 	struct ipv6_ct_tuple tuple = {

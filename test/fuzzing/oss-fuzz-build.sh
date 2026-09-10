@@ -32,6 +32,7 @@ compile_native_go_fuzzer github.com/cilium/cilium/pkg/container/bitlpm FuzzUint8
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/fqdn/matchpattern FuzzMatchpatternValidate FuzzMatchpatternValidate
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/fqdn/matchpattern FuzzMatchpatternValidateWithoutCache FuzzMatchpatternValidateWithoutCache
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/fqdn/namemanager FuzzMapSelectorsToNamesLocked FuzzMapSelectorsToNamesLocked
+compile_native_go_fuzzer github.com/cilium/cilium/pkg/hubble/metrics/pathtemplate FuzzCompileAndMatch FuzzCompileAndMatch
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/hubble/parser FuzzParserDecode FuzzParserDecode
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2 FuzzCiliumClusterwideNetworkPolicyParse FuzzCiliumClusterwideNetworkPolicyParse
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2 FuzzCiliumNetworkPolicyParse FuzzCiliumNetworkPolicyParse
@@ -45,4 +46,5 @@ compile_native_go_fuzzer github.com/cilium/cilium/pkg/monitor/format FuzzFormatE
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/policy FuzzAccumulateMapChange FuzzAccumulateMapChange
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/policy FuzzDenyPreferredInsert FuzzDenyPreferredInsert
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/policy FuzzDistillPolicy FuzzDistillPolicy
+compile_native_go_fuzzer github.com/cilium/cilium/pkg/policy FuzzDistillPolicyWithAggregates FuzzDistillPolicyWithAggregates
 compile_native_go_fuzzer github.com/cilium/cilium/pkg/policy FuzzResolvePolicy FuzzResolvePolicy

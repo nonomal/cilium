@@ -54,10 +54,10 @@ const (
 	RuntimePath = "/var/run/cilium"
 
 	// RuntimePathRights are the default access rights of the RuntimePath directory
-	RuntimePathRights = 0775
+	RuntimePathRights = 0o775
 
 	// StateDirRights are the default access rights of the state directory
-	StateDirRights = 0770
+	StateDirRights = 0o770
 
 	// StateDir is the default path for the state directory relative to RuntimePath
 	StateDir = "state"
@@ -191,6 +191,10 @@ const (
 
 	// EnableIPv6 is the default value for IPv6 enablement
 	EnableIPv6 = true
+
+	// PreferIpv6 is the default value for preferring IPv6 addresses
+	// over IPv4 when both are available.
+	PreferIpv6 = false
 
 	// EnableIPv6NDP is the default value for IPv6 NDP support enablement
 	EnableIPv6NDP = false
@@ -472,9 +476,6 @@ const (
 	EnableVTEP     = false
 	MaxVTEPDevices = 8
 
-	// Enable BGP control plane features.
-	EnableBGPControlPlane = false
-
 	// EnableK8sNetworkPolicy enables support for K8s NetworkPolicy.
 	EnableK8sNetworkPolicy = true
 
@@ -539,6 +540,9 @@ const (
 
 	// PolicyAccouting is the default value for option.PolicyAccounting
 	PolicyAccounting = true
+
+	// EnableDatapathPlugins is the default value for option.EnableDatapathPlugins
+	EnableDatapathPlugins = false
 )
 
 var (

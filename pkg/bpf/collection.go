@@ -8,11 +8,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/bits"
 	"os"
 	"path"
 	"strings"
+	"unsafe"
+
+	"golang.org/x/sys/cpu"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/asm"
 	"github.com/cilium/ebpf/btf"
 	"golang.org/x/sys/unix"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -44,9 +49,9 @@ func isEntrypoint(prog *ebpf.ProgramSpec) bool {
 	return strings.HasSuffix(prog.SectionName, "/entry")
 }
 
-// isTailCall returns true if the program is marked with the __declare_tail()
+// IsTailCall returns true if the program is marked with the __declare_tail()
 // annotation.
-func isTailCall(prog *ebpf.ProgramSpec) bool {
+func IsTailCall(prog *ebpf.ProgramSpec) bool {
 	return strings.HasSuffix(prog.SectionName, "/tail")
 }
 
@@ -54,7 +59,7 @@ func isTailCall(prog *ebpf.ProgramSpec) bool {
 // marked with the __declare_tail() annotation. The slot is the index in the
 // calls map that the program will be called from.
 func tailCallSlot(prog *ebpf.ProgramSpec) (uint32, error) {
-	if !isTailCall(prog) {
+	if !IsTailCall(prog) {
 		return 0, fmt.Errorf("program %s is not a tail call", prog.Name)
 	}
 
@@ -88,7 +93,7 @@ func resolveTailCalls(spec *ebpf.CollectionSpec) error {
 
 	slots := make(map[uint32]struct{})
 	for name, prog := range spec.Programs {
-		if !isTailCall(prog) {
+		if !IsTailCall(prog) {
 			continue
 		}
 
@@ -119,8 +124,7 @@ func LoadAndAssign(logger *slog.Logger, to any, spec *ebpf.CollectionSpec, opts 
 	opts.Keep = keep
 
 	coll, commit, err := LoadCollection(logger, spec, opts)
-	var ve *ebpf.VerifierError
-	if errors.As(err, &ve) {
+	if ve, ok := errors.AsType[*ebpf.VerifierError](err); ok {
 		if _, err := fmt.Fprintf(os.Stderr, "Verifier error: %s\nVerifier log: %+v\n", err, ve); err != nil {
 			return nil, fmt.Errorf("writing verifier log to stderr: %w", err)
 		}
@@ -161,6 +165,10 @@ type CollectionOptions struct {
 	// MapRegistry is the map registry to use for replacing MapSpecs at load time.
 	// If nil, no maps are replaced.
 	MapRegistry *registry.MapRegistry
+
+	// ProgramPatches transform the instructions in a program after
+	// reachability pruning.
+	ProgramPatches map[string]func(asm.Instructions) (asm.Instructions, error)
 }
 
 func (co *CollectionOptions) populateMapReplacements() {
@@ -252,9 +260,17 @@ func LoadCollection(logger *slog.Logger, spec *ebpf.CollectionSpec, opts *Collec
 		return nil, nil, fmt.Errorf("writing constants: %w", err)
 	}
 
+	if err := modifyAuxData(spec); err != nil {
+		return nil, nil, fmt.Errorf("loading auxiliary data: %w", err)
+	}
+
 	// Find and strip all CILIUM_PIN_REPLACE pinning flags before creating the
 	// Collection. ebpf-go will reject maps with pins it doesn't recognize.
 	toReplace := consumePinReplace(spec)
+
+	if err := patchPrograms(spec, opts.ProgramPatches); err != nil {
+		return nil, nil, fmt.Errorf("applying program patches: %w", err)
+	}
 
 	// Attempt to load the Collection.
 	coll, err := ebpf.NewCollectionWithOptions(spec, opts.CollectionOptions)
@@ -423,4 +439,76 @@ func logFreedMaps(logger *slog.Logger, coll *ebpf.Collection, fixed *set.Set[str
 	}
 
 	logger.Debug("No freed maps found after loading Collection")
+}
+
+func modifyAuxData(spec *ebpf.CollectionSpec) error {
+	auxData, found := spec.Maps[".data.aux"]
+	if !found {
+		return nil
+	}
+
+	// Round the per-CPU slot size up to a power of two (at least one cache line).
+	cacheLineSize := uint64(unsafe.Sizeof(cpu.CacheLinePad{}))
+	strideShift := uint64(bits.Len64(uint64(auxData.ValueSize) - 1))
+	if minShift := uint64(bits.Len64(cacheLineSize - 1)); strideShift < minShift {
+		strideShift = minShift
+	}
+	stride := uint64(1) << strideShift
+
+	// Communicate the shift to the BPF programs so it can calculate the offset from any
+	// variable in the map to the value for the current CPU.
+	auxStrideShift, found := spec.Variables["_aux_stride_shift"]
+	if !found {
+		return fmt.Errorf("missing _aux_stride_shift variable for .data.aux map")
+	}
+	err := auxStrideShift.Set(strideShift)
+	if err != nil {
+		return fmt.Errorf("setting _aux_stride_shift: %w", err)
+	}
+
+	// Resize the map so it has a copy of the values for each possible CPU, rounded
+	// up to the next power of two.
+	cpus := ebpf.MustPossibleCPU()
+	cpuSlots := nextPow2(uint64(cpus))
+	valueSize := uint32(cpuSlots) * uint32(stride)
+	auxData.Contents[0] = ebpf.MapKV{Key: uint32(0), Value: make([]byte, valueSize)}
+	auxData.ValueSize = valueSize
+
+	// Communicate the CPU mask to the BPF programs, used to bound the per-CPU offset
+	// without a branch in the BPF code.
+	auxCPUMask, found := spec.Variables["_aux_cpu_mask"]
+	if !found {
+		return fmt.Errorf("missing _aux_cpu_mask variable for .data.aux map")
+	}
+	err = auxCPUMask.Set(cpuSlots - 1)
+	if err != nil {
+		return fmt.Errorf("setting _aux_cpu_mask: %w", err)
+	}
+
+	return nil
+}
+
+// nextPow2 returns the smallest power of two that is >= n, or 1 if n == 0.
+func nextPow2(n uint64) uint64 {
+	if n <= 1 {
+		return 1
+	}
+	return 1 << bits.Len64(n-1)
+}
+
+func patchPrograms(coll *ebpf.CollectionSpec, patches map[string]func(asm.Instructions) (asm.Instructions, error)) error {
+	for name, patch := range patches {
+		prog := coll.Programs[name]
+		if prog == nil {
+			continue
+		}
+
+		newInstructions, err := patch(prog.Instructions)
+		if err != nil {
+			return fmt.Errorf("patching %s: %w", name, err)
+		}
+		prog.Instructions = newInstructions
+	}
+
+	return nil
 }

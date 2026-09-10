@@ -2,6 +2,7 @@
 /install/kubernetes/cilium/values.yaml linguist-generated
 /install/kubernetes/cilium/README.md linguist-generated
 go.sum linguist-generated
+vendor/modules.txt linguist-generated
 examples/kubernetes/connectivity-check/connectivity-*.yaml linguist-generated
 pkg/k8s/apis/cilium.io/v2/client/crds/*.yaml linguist-generated
 test/controlplane/**/v1.[0-9][0-9]/*.yaml linguist-generated
@@ -10,13 +11,17 @@ Documentation/cmdref/*.md linguist-generated
 Documentation/crdlist.rst linguist-generated
 Documentation/helm-values.rst linguist-generated
 Documentation/codeowners.rst linguist-generated
+Documentation/requirements.txt linguist-generated
 Documentation/_static/* -diff
 *svg -diff
+*excalidraw -diff
 pkg/k8s/client/clientset/** linguist-generated
 pkg/k8s/client/informers/** linguist-generated
 pkg/k8s/client/listers/** linguist-generated
 *.bt linguist-language=D
 pkg/datapath/config/*_config.go linguist-generated
+Documentation/**/*.inc linguist-language=reStructuredText
+Documentation/**/*.rst.tmpl linguist-language=reStructuredText
 
 # Merge driver configuration for specific paths
 # To set up these merge drivers locally, run:

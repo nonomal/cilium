@@ -40,7 +40,8 @@ import (
 	"k8s.io/client-go/kubernetes"
 	rest "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
-	"sigs.k8s.io/mcs-api/pkg/apis/v1alpha1"
+	k8snet "k8s.io/utils/net"
+	"sigs.k8s.io/mcs-api/pkg/apis/v1beta1"
 	mcsclient "sigs.k8s.io/mcs-api/pkg/client/clientset/versioned"
 )
 
@@ -56,7 +57,11 @@ var (
 	clients                          []clusterClients
 	loadingRules                     *clientcmd.ClientConfigLoadingRules
 	skipVerifyEndpointSliceManagedBy bool
-	ctx                              = context.TODO()
+	dnsDomain                        string
+	organization                     string
+	project                          string
+	version                          string
+	url                              string
 )
 
 // TestConformance runs the conformance test.
@@ -76,13 +81,19 @@ func init() {
 			"However with some implementations, MCS EndpointSlices may be created and managed by K8s. If this flag is set to true, "+
 			"the test only verifies the presence of the label.",
 			discoveryv1.LabelManagedBy, K8sEndpointSliceManagedByName))
+	flag.StringVar(&dnsDomain, "dns-domain", "clusterset.local", "The DNS domain suffix used for multi-cluster services. "+
+		"The default is \"clusterset.local\" as specified by the MCS spec, but some implementations may use a custom domain.")
+	flag.StringVar(&organization, "organization", "", "Name of the organization responsible for the MCS implementation")
+	flag.StringVar(&project, "project", "", "Name of the MCS implementation project being tested")
+	flag.StringVar(&version, "version", "", "Version of the MCS implementation being tested")
+	flag.StringVar(&url, "url", "", "A URL pointing to the MCS implementation project or documentation")
 }
 
-var _ = BeforeSuite(func() {
-	Expect(setupClients()).To(Succeed(), "Test suite set up failed")
+var _ = BeforeSuite(func(ctx context.Context) {
+	Expect(setupClients(ctx)).To(Succeed(), "Test suite set up failed")
 })
 
-func setupClients() error {
+func setupClients(ctx context.Context) error {
 	splitContexts := strings.Split(contexts, ",")
 	clients = make([]clusterClients, len(splitContexts))
 	accumulatedErrors := []error{}
@@ -124,11 +135,11 @@ func setupClients() error {
 				return fmt.Errorf("error setting up an MCS API client on context %s: %w", name, err)
 			}
 
-			if _, err := mcsClient.MulticlusterV1alpha1().ServiceExports("").List(context.TODO(), metav1.ListOptions{}); err != nil {
+			if _, err := mcsClient.MulticlusterV1beta1().ServiceExports("").List(ctx, metav1.ListOptions{}); err != nil {
 				return fmt.Errorf("error listing ServiceExports on context %s: %w. Is the MCS API installed?", name, err)
 			}
 
-			if _, err := mcsClient.MulticlusterV1alpha1().ServiceImports("").List(context.TODO(), metav1.ListOptions{}); err != nil {
+			if _, err := mcsClient.MulticlusterV1beta1().ServiceImports("").List(ctx, metav1.ListOptions{}); err != nil {
 				return fmt.Errorf("error listing ServiceImports on context %s: %w. Is the MCS API installed?", name, err)
 			}
 
@@ -146,7 +157,7 @@ func setupClients() error {
 type testDriver struct {
 	namespace          string
 	helloService       *corev1.Service
-	helloServiceExport *v1alpha1.ServiceExport
+	helloServiceExport *v1beta1.ServiceExport
 	helloDeployment    *appsv1.Deployment
 	requestPod         *corev1.Pod
 	autoExportService  bool
@@ -164,7 +175,7 @@ func newTestDriver() *testDriver {
 		t.autoExportService = true
 	})
 
-	JustBeforeEach(func() {
+	JustBeforeEach(func(ctx context.Context) {
 		Expect(clients).ToNot(BeEmpty())
 
 		// Set up the shared namespace
@@ -176,7 +187,7 @@ func newTestDriver() *testDriver {
 		}
 
 		// Set up the remote service (the first cluster is considered to be the remote)
-		t.deployHelloService(&clients[0], t.helloService)
+		t.helloService = t.deployHelloService(ctx, &clients[0], t.helloService)
 
 		// Start the request pod on all clusters
 		for _, client := range clients {
@@ -184,11 +195,11 @@ func newTestDriver() *testDriver {
 		}
 
 		if t.autoExportService {
-			t.createServiceExport(&clients[0], t.helloServiceExport)
+			t.createServiceExport(ctx, &clients[0], t.helloServiceExport)
 		}
 	})
 
-	AfterEach(func() {
+	AfterEach(func(ctx context.Context) {
 		// Clean up the shared namespace
 		for _, client := range clients {
 			err := client.k8s.CoreV1().Namespaces().Delete(ctx, t.namespace, metav1.DeleteOptions{})
@@ -201,22 +212,22 @@ func newTestDriver() *testDriver {
 	return t
 }
 
-func (t *testDriver) createServiceExport(c *clusterClients, serviceExport *v1alpha1.ServiceExport) {
-	_, err := c.mcs.MulticlusterV1alpha1().ServiceExports(t.namespace).Create(
+func (t *testDriver) createServiceExport(ctx context.Context, c *clusterClients, serviceExport *v1beta1.ServiceExport) {
+	_, err := c.mcs.MulticlusterV1beta1().ServiceExports(t.namespace).Create(
 		ctx, serviceExport, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
 
 	By(fmt.Sprintf("Service \"%s/%s\" exported on cluster %q", t.namespace, helloServiceName, c.name))
 }
 
-func (t *testDriver) deleteServiceExport(c *clusterClients) {
-	Expect(c.mcs.MulticlusterV1alpha1().ServiceExports(t.namespace).Delete(ctx, helloServiceName,
+func (t *testDriver) deleteServiceExport(ctx context.Context, c *clusterClients) {
+	Expect(c.mcs.MulticlusterV1beta1().ServiceExports(t.namespace).Delete(ctx, helloServiceName,
 		metav1.DeleteOptions{})).ToNot(HaveOccurred())
 
 	By(fmt.Sprintf("Service \"%s/%s\" unexported on cluster %q", t.namespace, helloServiceName, c.name))
 }
 
-func (t *testDriver) deployHelloService(c *clusterClients, service *corev1.Service) {
+func (t *testDriver) deployHelloService(ctx context.Context, c *clusterClients, service *corev1.Service) *corev1.Service {
 	if t.helloDeployment != nil {
 		_, err := c.k8s.AppsV1().Deployments(t.namespace).Create(ctx, t.helloDeployment, metav1.CreateOptions{})
 		Expect(err).ToNot(HaveOccurred())
@@ -225,11 +236,14 @@ func (t *testDriver) deployHelloService(c *clusterClients, service *corev1.Servi
 	deployed, err := c.k8s.CoreV1().Services(t.namespace).Create(ctx, service, metav1.CreateOptions{})
 	Expect(err).ToNot(HaveOccurred())
 
-	By(fmt.Sprintf("Service \"%s/%s\" deployed on cluster %q", deployed.Namespace, deployed.Name, c.name))
+	By(fmt.Sprintf("Service \"%s/%s\" with IP families %v deployed on cluster %q", deployed.Namespace, deployed.Name,
+		deployed.Spec.IPFamilies, c.name))
+
+	return deployed
 }
 
-func (t *testDriver) getServiceImport(c *clusterClients, name string) *v1alpha1.ServiceImport {
-	si, err := c.mcs.MulticlusterV1alpha1().ServiceImports(t.namespace).Get(ctx, name, metav1.GetOptions{})
+func (t *testDriver) getServiceImport(ctx context.Context, c *clusterClients, name string) *v1beta1.ServiceImport {
+	si, err := c.mcs.MulticlusterV1beta1().ServiceImports(t.namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) || errors.Is(err, context.DeadlineExceeded) ||
 		(err != nil && strings.Contains(err.Error(), "rate limiter")) {
 		return nil
@@ -240,12 +254,14 @@ func (t *testDriver) getServiceImport(c *clusterClients, name string) *v1alpha1.
 	return si
 }
 
-func (t *testDriver) awaitServiceImport(c *clusterClients, name string, reportNonConformanceOnMissing bool,
-	verify func(Gomega, *v1alpha1.ServiceImport)) *v1alpha1.ServiceImport {
-	var serviceImport *v1alpha1.ServiceImport
+func (t *testDriver) awaitServiceImport(ctx context.Context, c *clusterClients, name string, reportNonConformanceOnMissing bool,
+	verify func(Gomega, *v1beta1.ServiceImport)) *v1beta1.ServiceImport {
+	var serviceImport *v1beta1.ServiceImport
 
-	Eventually(func(g Gomega) {
-		si := t.getServiceImport(c, name)
+	By(fmt.Sprintf("Retrieving ServiceImport for %q on cluster %q", name, c.name))
+
+	Eventually(func(g Gomega, ctx context.Context) {
+		si := t.getServiceImport(ctx, c, name)
 
 		missingMsg := fmt.Sprintf("ServiceImport was not found on cluster %q", c.name)
 
@@ -264,14 +280,24 @@ func (t *testDriver) awaitServiceImport(c *clusterClients, name string, reportNo
 
 		// The final run succeeded so cancel any prior non-conformance reported.
 		cancelNonConformanceReport()
-	}).Within(20 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+	}).WithContext(ctx).Within(20 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
 	return serviceImport
 }
 
-func (t *testDriver) awaitNoServiceImport(c *clusterClients, name, nonConformanceMsg string) {
+func (t *testDriver) awaitServiceImportIPFamilies(ctx context.Context, c *clusterClients) []corev1.IPFamily {
+	serviceImport := t.awaitServiceImport(ctx, c, t.helloService.Name, false,
+		func(g Gomega, serviceImport *v1beta1.ServiceImport) {
+			g.Expect(serviceImport.Spec.IPFamilies).NotTo(BeEmpty(),
+				"ServiceImport on cluster %q does not contain an IP family", c.name)
+		})
+
+	return serviceImport.Spec.IPFamilies
+}
+
+func (t *testDriver) awaitNoServiceImport(ctx context.Context, c *clusterClients, name, nonConformanceMsg string) {
 	Eventually(func() bool {
-		_, err := c.mcs.MulticlusterV1alpha1().ServiceImports(t.namespace).Get(ctx, name, metav1.GetOptions{})
+		_, err := c.mcs.MulticlusterV1beta1().ServiceImports(t.namespace).Get(ctx, name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			return true
 		}
@@ -282,24 +308,24 @@ func (t *testDriver) awaitNoServiceImport(c *clusterClients, name, nonConformanc
 	}, 20*time.Second, 100*time.Millisecond).Should(BeTrue(), reportNonConformant(nonConformanceMsg))
 }
 
-func (t *testDriver) ensureServiceImport(c *clusterClients, name, nonConformanceMsg string) {
+func (t *testDriver) ensureServiceImport(ctx context.Context, c *clusterClients, name, nonConformanceMsg string) {
 	Consistently(func() error {
-		_, err := c.mcs.MulticlusterV1alpha1().ServiceImports(t.namespace).Get(ctx, name, metav1.GetOptions{})
+		_, err := c.mcs.MulticlusterV1beta1().ServiceImports(t.namespace).Get(ctx, name, metav1.GetOptions{})
 		return err
 	}, 5*time.Second, 100*time.Millisecond).ShouldNot(HaveOccurred(), reportNonConformant(nonConformanceMsg))
 }
 
-func (t *testDriver) ensureNoServiceImport(c *clusterClients, name, nonConformanceMsg string) {
+func (t *testDriver) ensureNoServiceImport(ctx context.Context, c *clusterClients, name, nonConformanceMsg string) {
 	Consistently(func() bool {
-		_, err := c.mcs.MulticlusterV1alpha1().ServiceImports(t.namespace).Get(ctx, name, metav1.GetOptions{})
+		_, err := c.mcs.MulticlusterV1beta1().ServiceImports(t.namespace).Get(ctx, name, metav1.GetOptions{})
 		return apierrors.IsNotFound(err)
 	}, 5*time.Second, 100*time.Millisecond).Should(BeTrue(), reportNonConformant(nonConformanceMsg))
 }
 
-func (t *testDriver) awaitServiceExportCondition(c *clusterClients, condType v1alpha1.ServiceExportConditionType,
+func (t *testDriver) awaitServiceExportCondition(ctx context.Context, c *clusterClients, condType v1beta1.ServiceExportConditionType,
 	wantStatus metav1.ConditionStatus) {
 	Eventually(func() bool {
-		se, err := c.mcs.MulticlusterV1alpha1().ServiceExports(t.namespace).Get(ctx, helloServiceName, metav1.GetOptions{})
+		se, err := c.mcs.MulticlusterV1beta1().ServiceExports(t.namespace).Get(ctx, helloServiceName, metav1.GetOptions{})
 		Expect(err).ToNot(HaveOccurred())
 
 		cond := meta.FindStatusCondition(se.Status.Conditions, string(condType))
@@ -323,7 +349,7 @@ func (t *testDriver) startRequestPod(ctx context.Context, client clusterClients)
 		}
 
 		return nil
-	}, 20, 1).Should(Succeed())
+	}, 60, 1).Should(Succeed())
 }
 
 func (t *testDriver) execCmdOnRequestPod(c *clusterClients, command []string) string {
@@ -347,13 +373,13 @@ func (t *testDriver) awaitCmdOutputMatches(c *clusterClients, command []string, 
 	}).Within(time.Duration(20*int64(nIter))*time.Second).ProbeEvery(time.Second).MustPassRepeatedly(nIter).Should(Succeed(), msg)
 }
 
-func (t *testDriver) awaitServicePodIP(c *clusterClients) string {
+func (t *testDriver) awaitServicePodIP(ctx context.Context, c *clusterClients) string {
 	By(fmt.Sprintf("Awaiting service deployment pod IP on cluster %q", c.name))
 
 	servicePodIP := ""
 
-	Eventually(func(g Gomega) {
-		pods, err := c.k8s.CoreV1().Pods(t.namespace).List(context.TODO(), metav1.ListOptions{
+	Eventually(func(g Gomega, ctx context.Context) {
+		pods, err := c.k8s.CoreV1().Pods(t.namespace).List(ctx, metav1.ListOptions{
 			LabelSelector: metav1.FormatLabelSelector(newHelloDeployment().Spec.Selector),
 		})
 
@@ -362,28 +388,30 @@ func (t *testDriver) awaitServicePodIP(c *clusterClients) string {
 
 		servicePodIP = pods.Items[0].Status.PodIP
 		g.Expect(servicePodIP).NotTo(BeEmpty(), "Service deployment pod was not allocated an IP")
-	}).Within(20 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
+	}).WithContext(ctx).Within(60 * time.Second).WithPolling(100 * time.Millisecond).Should(Succeed())
 
 	By(fmt.Sprintf("Retrieved service deployment pod IP %q", servicePodIP))
 
 	return servicePodIP
 }
 
-func (t *testDriver) execPortConnectivityCommand(port int, matchStr string, nIter int) {
-	command := []string{"sh", "-c", fmt.Sprintf("echo hi | nc %s.%s.svc.clusterset.local %d",
-		t.helloService.Name, t.namespace, port)}
-
+func (t *testDriver) execPortConnectivityCommand(ctx context.Context, port int, matchStr string, nIter int) {
 	for _, client := range clients {
-		By(fmt.Sprintf("Executing command %q on cluster %q", strings.Join(command, " "), client.name))
+		for _, ipFamily := range t.awaitServiceImportIPFamilies(ctx, &client) {
+			serviceFQDN := fmt.Sprintf("%s.%s.svc.%s", t.helloService.Name, t.namespace, dnsDomain)
+			command := []string{"sh", "-c", ncCommand(ipFamily, serviceFQDN, port)}
 
-		t.awaitCmdOutputMatches(&client, command, matchStr, nIter, reportNonConformant(""))
+			By(fmt.Sprintf("Executing %s command %q on cluster %q", ipFamily, strings.Join(command, " "), client.name))
+
+			t.awaitCmdOutputMatches(&client, command, matchStr, nIter, reportNonConformant(""))
+		}
 	}
 }
 
 type twoClusterTestDriver struct {
 	*testDriver
 	helloService2       *corev1.Service
-	helloServiceExport2 *v1alpha1.ServiceExport
+	helloServiceExport2 *v1beta1.ServiceExport
 }
 
 func newTwoClusterTestDriver(t *testDriver) *twoClusterTestDriver {
@@ -397,32 +425,32 @@ func newTwoClusterTestDriver(t *testDriver) *twoClusterTestDriver {
 		t.autoExportService = false
 	})
 
-	JustBeforeEach(func() {
-		t.createServiceExport(&clients[0], t.helloServiceExport)
+	JustBeforeEach(func(ctx context.Context) {
+		t.createServiceExport(ctx, &clients[0], t.helloServiceExport)
 
 		// The conflict resolution policy in the MCS spec (KEP 1645) allows an implementation to favor maintaining
 		// service continuity and avoiding potentially disruptive changes, as such, an implementation may choose the
 		// first observed exported service when resolving conflicts. To support this, verify the ServiceImport is
 		// created on the first cluster prior to deploying on the second cluster.
-		t.awaitServiceImport(&clients[0], helloServiceName, false, nil)
+		t.awaitServiceImport(ctx, &clients[0], helloServiceName, false, nil)
 
 		// Delay a little before deploying on the second cluster to ensure the first cluster's ServiceExport timestamp
 		// is older so conflict checking is deterministic for implementations that use the timestamp when resolving conflicts.
 		// Make the delay at least 1 sec as creation timestamps have seconds granularity.
 		time.Sleep(1100 * time.Millisecond)
 
-		t.deployHelloService(&clients[1], tt.helloService2)
-		t.createServiceExport(&clients[1], tt.helloServiceExport2)
+		t.deployHelloService(ctx, &clients[1], tt.helloService2)
+		t.createServiceExport(ctx, &clients[1], tt.helloServiceExport2)
 	})
 
 	return tt
 }
 
-func toMCSPorts(from []corev1.ServicePort) []v1alpha1.ServicePort {
-	var mcsPorts []v1alpha1.ServicePort
+func toMCSPorts(from []corev1.ServicePort) []v1beta1.ServicePort {
+	var mcsPorts []v1beta1.ServicePort
 
 	for _, port := range from {
-		mcsPorts = append(mcsPorts, v1alpha1.ServicePort{
+		mcsPorts = append(mcsPorts, v1beta1.ServicePort{
 			Name:        port.Name,
 			Protocol:    port.Protocol,
 			Port:        port.Port,
@@ -433,8 +461,8 @@ func toMCSPorts(from []corev1.ServicePort) []v1alpha1.ServicePort {
 	return sortMCSPorts(mcsPorts)
 }
 
-func sortMCSPorts(p []v1alpha1.ServicePort) []v1alpha1.ServicePort {
-	slices.SortFunc(p, func(a, b v1alpha1.ServicePort) int {
+func sortMCSPorts(p []v1beta1.ServicePort) []v1beta1.ServicePort {
+	slices.SortFunc(p, func(a, b v1beta1.ServicePort) int {
 		return cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
 	})
 
@@ -445,4 +473,53 @@ func requireTwoClusters() {
 	if len(clients) < 2 {
 		Skip("This test requires at least 2 clusters - skipping")
 	}
+}
+
+func addressTypeOf(f corev1.IPFamily) discoveryv1.AddressType {
+	if f == corev1.IPv4Protocol {
+		return discoveryv1.AddressTypeIPv4
+	}
+
+	return discoveryv1.AddressTypeIPv6
+}
+
+func dnsRecordTypeOf(f corev1.IPFamily) string {
+	if f == corev1.IPv4Protocol {
+		return "A"
+	}
+
+	return "AAAA"
+}
+
+func ipFamilyOf(ip string) corev1.IPFamily {
+	f := k8snet.IPFamilyOfString(ip)
+	Expect(f).NotTo(Equal(k8snet.IPFamilyUnknown))
+
+	if f == k8snet.IPv4 {
+		return corev1.IPv4Protocol
+	}
+
+	return corev1.IPv6Protocol
+}
+
+// ncCommand creates a shell command that connects to a service using nc with the specified IP family.
+// The netshoot image provides nc which supports -4/-6 flags for forcing IP family.
+func ncCommand(ipFamily corev1.IPFamily, serviceFQDN string, port int) string {
+	ipFlag := "-4"
+	if ipFamily == corev1.IPv6Protocol {
+		ipFlag = "-6"
+	}
+
+	// For IPv6, nc -6 with hostname seems to hang in IPv6-only environments
+	// Fall back to explicit DNS resolution and pass IP directly to nc
+	if ipFamily == corev1.IPv6Protocol {
+		fqdnWithDot := serviceFQDN + "."
+		return fmt.Sprintf(
+			"addr=$(nslookup -type=AAAA %s 2>&1 | grep '^Address:' | grep -v '#' | tail -1 | awk '{print $2}'); "+
+				"if [ -z \"$addr\" ]; then echo 'No IPv6 address found'; exit 1; fi; "+
+				"echo hi | nc -v -w 2 $addr %d 2>&1",
+			fqdnWithDot, port)
+	}
+
+	return fmt.Sprintf("echo hi | nc -v -w 2 %s %s %d 2>&1", ipFlag, serviceFQDN, port)
 }

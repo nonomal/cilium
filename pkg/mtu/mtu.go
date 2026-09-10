@@ -30,10 +30,6 @@ const (
 	TunnelOverheadIPv4 = 50
 	TunnelOverheadIPv6 = 70
 
-	// DsrTunnelOverhead is about the GENEVE DSR option that gets inserted
-	// by the LB, when addressing a Service in hs-ipcache mode
-	DsrTunnelOverhead = 12
-
 	// EncryptionIPsecOverhead is an approximation for bytes used for
 	// encryption. Depending on key size and encryption type the actual
 	// size may vary here we do calculations for 128B keys and Auth. The
@@ -58,12 +54,20 @@ const (
 	// encapsulation.
 	//
 	// https://github.com/torvalds/linux/blob/v5.12/drivers/net/wireguard/device.c#L262:
+	// https://github.com/torvalds/linux/blob/v5.12/drivers/net/wireguard/send.c#L141
 	//      MESSAGE_MINIMUM_LENGTH:    32B
 	//      Outer IPv4 or IPv6 header: 40B
 	//      Outer UDP header:           8B
+	//      Maximum padding:           15B
 	//                                 ---
 	//      Total extra bytes:         80B
-	WireguardOverhead = 80
+	WireguardOverhead = 95
+
+	// IPv6MinMTU is the minimum MTU required for IPv6 to function on a
+	// network interface, as defined in RFC 8200 section 5. The Linux kernel
+	// refuses to initialize inet6_dev on interfaces with MTU below this
+	// value, causing all IPv6 packet reception to be silently discarded.
+	IPv6MinMTU = 1280
 
 	// IPIPv4Overhead is the overhead for the IPv4 header used in IPIP devices.
 	// sizeof(struct iphdr)
@@ -81,14 +85,14 @@ const (
 type Configuration struct {
 	authKeySize      int
 	encapEnabled     bool
-	encryptEnabled   bool
+	ipsecEnabled     bool
 	wireguardEnabled bool
 	tunnelOverhead   int
 }
 
 // NewConfiguration returns a new MTU configuration which is used to calculate
 // MTU values from a base MTU based on the config.
-func NewConfiguration(authKeySize int, encryptEnabled, encapEnabled, wireguardEnabled, tunnelOverIPv6 bool) Configuration {
+func NewConfiguration(authKeySize int, ipsecEnabled, encapEnabled, wireguardEnabled, tunnelOverIPv6 bool) Configuration {
 	tunnelOverhead := TunnelOverheadIPv4
 	if tunnelOverIPv6 {
 		tunnelOverhead = TunnelOverheadIPv6
@@ -96,7 +100,7 @@ func NewConfiguration(authKeySize int, encryptEnabled, encapEnabled, wireguardEn
 	return Configuration{
 		authKeySize:      authKeySize,
 		encapEnabled:     encapEnabled,
-		encryptEnabled:   encryptEnabled,
+		ipsecEnabled:     ipsecEnabled,
 		wireguardEnabled: wireguardEnabled,
 		tunnelOverhead:   tunnelOverhead,
 	}
@@ -124,19 +128,19 @@ func (c *Configuration) getRouteMTU(baseMTU int) int {
 		return c.getDeviceMTU(baseMTU) - WireguardOverhead
 	}
 
-	if !c.encapEnabled && !c.encryptEnabled {
+	if !c.encapEnabled && !c.ipsecEnabled {
 		return c.getDeviceMTU(baseMTU)
 	}
 
 	encryptOverhead := 0
 
-	if c.encryptEnabled {
+	if c.ipsecEnabled {
 		// Add the difference between the default and the actual key sizes here
 		// to account for users specifying non-default auth key lengths.
 		encryptOverhead = EncryptionIPsecOverhead + (c.authKeySize - EncryptionDefaultAuthKeyLength)
 	}
 
-	if c.encryptEnabled && !c.encapEnabled {
+	if c.ipsecEnabled && !c.encapEnabled {
 		preEncryptMTU := baseMTU - encryptOverhead
 		if preEncryptMTU == 0 {
 			return EthernetMTU - EncryptionIPsecOverhead
@@ -146,7 +150,7 @@ func (c *Configuration) getRouteMTU(baseMTU int) int {
 
 	tunnelMTU := baseMTU - (c.tunnelOverhead + encryptOverhead)
 	if tunnelMTU <= 0 {
-		if c.encryptEnabled {
+		if c.ipsecEnabled {
 			return EthernetMTU - (c.tunnelOverhead + EncryptionIPsecOverhead)
 		}
 		return EthernetMTU - c.tunnelOverhead

@@ -9,6 +9,7 @@ import (
 
 	"github.com/cilium/cilium/cilium-cli/connectivity/builder/manifests/template"
 	"github.com/cilium/cilium/cilium-cli/connectivity/check"
+	"github.com/cilium/cilium/cilium-cli/connectivity/tests"
 	"github.com/cilium/cilium/cilium-cli/utils/features"
 )
 
@@ -40,8 +41,14 @@ var (
 	//go:embed manifests/client-egress-to-fqdns-and-http-get.yaml
 	clientEgressToFQDNsAndHTTPGetPolicyYAML string
 
+	//go:embed manifests/client-egress-to-fqdns-and-ccec-listener.yaml
+	clientEgressToFQDNsAndCCECListenerYAML string
+
 	//go:embed manifests/echo-ingress-from-other-client.yaml
 	echoIngressFromOtherClientPolicyYAML string
+
+	//go:embed manifests/echo-ingress-from-client-tiered-wildcard-pass-l7.yaml
+	echoIngressFromClientTieredWildcardPassL7PolicyYAML string
 
 	//go:embed manifests/client-egress-to-cidr-cp-host-knp.yaml
 	clientEgressToCIDRCPHostPolicyYAML string
@@ -75,6 +82,9 @@ var (
 
 	//go:embed manifests/client-egress-l7-http.yaml
 	clientEgressL7HTTPPolicyYAML string
+
+	//go:embed manifests/client-egress-l7-http-connect.yaml
+	clientEgressL7HTTPConnectPolicyYAML string
 
 	//go:embed manifests/client-egress-l7-http-port-range.yaml
 	clientEgressL7HTTPPolicyPortRangeYAML string
@@ -126,6 +136,9 @@ var (
 
 	//go:embed manifests/allow-egress-specific-ns-ccnp.yaml
 	egresstoSpecificNSYAML string
+
+	//go:embed manifests/host-firewall-egress-to-fqdns.yaml
+	hostFirewallEgressToFQDNsPolicyYAML string
 )
 
 var (
@@ -162,10 +175,10 @@ func GetTestSuites(params check.Parameters) ([]func(connTests []*check.Connectiv
 				return networkPerformanceTests(connTests[0])
 			},
 		}, nil
-	case params.IncludeConnDisruptTest && params.ConnDisruptTestSetup:
+	case params.ConnDisruptTestSetup:
 		// Exit early, as --conn-disrupt-test-setup is only needed to deploy pods which
 		// will be used by another invocation of "cli connectivity test"
-		// with include --include-conn-disrupt-test"
+		// with conn-disrupt test flags (e.g. --include-conn-disrupt-test, --include-conn-disrupt-test-egw).
 		return []func(connTests []*check.ConnectivityTest, extraTests func(cts ...*check.ConnectivityTest) error) error{
 			func(connTests []*check.ConnectivityTest, _ func(cts ...*check.ConnectivityTest) error) error {
 				return connDisruptTests(connTests[0])
@@ -174,7 +187,7 @@ func GetTestSuites(params check.Parameters) ([]func(connTests []*check.Connectiv
 	case params.TestConcurrency > 1:
 		return []func(connTests []*check.ConnectivityTest, extraTests func(cts ...*check.ConnectivityTest) error) error{
 			func(connTests []*check.ConnectivityTest, extraTests func(cts ...*check.ConnectivityTest) error) error {
-				if connTests[0].Params().IncludeConnDisruptTest {
+				if connTests[0].ShouldRunConnDisrupt() {
 					if err := connDisruptTests(connTests[0]); err != nil {
 						return err
 					}
@@ -194,7 +207,7 @@ func GetTestSuites(params check.Parameters) ([]func(connTests []*check.Connectiv
 	default: // fallback to the sequential run
 		return []func(connTests []*check.ConnectivityTest, extraTests func(cts ...*check.ConnectivityTest) error) error{
 			func(connTests []*check.ConnectivityTest, extraTests func(cts ...*check.ConnectivityTest) error) error {
-				if connTests[0].Params().IncludeConnDisruptTest {
+				if connTests[0].ShouldRunConnDisrupt() {
 					if err := connDisruptTests(connTests[0]); err != nil {
 						return err
 					}
@@ -288,6 +301,9 @@ func concurrentTests(connTests []*check.ConnectivityTest) error {
 		clientEgressToCidrgroupDenyByLabel{},
 		clientEgressToCidrDenyDefault{},
 		clusterMeshEndpointSliceSync{},
+		clusterMeshNSNotGlobal{},
+		clusterMeshNSNotGlobalPodToPod{},
+		clusterMeshNSNotGlobalPodToPodDenied{},
 		health{},
 		northSouthLoadbalancing{},
 		podToPodEncryption{},
@@ -299,11 +315,13 @@ func concurrentTests(connTests []*check.ConnectivityTest) error {
 		egressGatewayWithL7Policy{},
 		podToNodeCidrpolicy{},
 		northSouthLoadbalancingWithL7Policy{},
+		eastWestLoadbalancingWithL7Policy{},
 		echoIngressL7{},
 		echoIngressL7NamedPort{},
 		clientEgressL7Method{},
 		clientEgressL7{},
 		clientEgressL7NamedPort{},
+		clientEgressL7Connect{},
 		clientEgressTlsSni{},
 		clientEgressL7SetHeader{},
 		echoIngressAuthAlwaysFail{},
@@ -337,6 +355,7 @@ func sequentialTests(ct *check.ConnectivityTest) error {
 	tests := []testBuilder{
 		hostFirewallIngress{},
 		hostFirewallEgress{},
+		hostFirewallEgressToFqdns{},
 		clientEgressL7TlsDenyWithoutHeaders{},
 		clientEgressL7TlsHeaders{},
 		egresstoSpecificNamespace{},
@@ -364,10 +383,12 @@ func renderTemplates(clusterNameLocal, clusterNameRemote string, param check.Par
 		"clientEgressToCIDRGroupExternalDenyLabelPolicyYAML":         clientEgressToCIDRGroupExternalDenyLabelPolicyYAML,
 		"clientEgressToCIDRGroupExternalDenyLabelPolicyV2Alpha1YAML": clientEgressToCIDRGroupExternalDenyLabelPolicyV2Alpha1YAML,
 		"clientEgressL7HTTPPolicyYAML":                               clientEgressL7HTTPPolicyYAML,
+		"clientEgressL7HTTPConnectPolicyYAML":                        clientEgressL7HTTPConnectPolicyYAML,
 		"clientEgressL7HTTPPolicyPortRangeYAML":                      clientEgressL7HTTPPolicyPortRangeYAML,
 		"clientEgressL7HTTPNamedPortPolicyYAML":                      clientEgressL7HTTPNamedPortPolicyYAML,
 		"clientEgressToFQDNsPolicyYAML":                              clientEgressToFQDNsPolicyYAML,
 		"clientEgressToFQDNsAndHTTPGetPolicyYAML":                    clientEgressToFQDNsAndHTTPGetPolicyYAML,
+		"clientEgressToFQDNsAndCCECListenerYAML":                     clientEgressToFQDNsAndCCECListenerYAML,
 		"clientEgressTLSSNIPolicyYAML":                               clientEgressTLSSNIPolicyYAML,
 		"clientEgressTLSSNIWildcardPolicyYAML":                       clientEgressTLSSNIWildcardPolicyYAML,
 		"clientEgressTLSSNIRandomWildcardPolicyYAML":                 clientEgressTLSSNIRandomWildcardPolicyYAML,
@@ -387,22 +408,34 @@ func renderTemplates(clusterNameLocal, clusterNameRemote string, param check.Par
 		"denyCIDRPolicyYAML":                                         denyCIDRPolicyYAML,
 		"ingressfromSpecificNSYAML":                                  ingressfromSpecificNSYAML,
 		"egresstoSpecificNSYAML":                                     egresstoSpecificNSYAML,
+		"echoIngressFromClientTieredWildcardPassL7YAML":              echoIngressFromClientTieredWildcardPassL7PolicyYAML,
+		"hostFirewallEgressToFQDNsPolicyYAML":                        hostFirewallEgressToFQDNsPolicyYAML,
 	}
 	if param.K8sLocalHostTest {
 		templates["clientEgressToCIDRCPHostPolicyYAML"] = clientEgressToCIDRCPHostPolicyYAML
 		templates["clientEgressToCIDRK8sPolicyKNPYAML"] = clientEgressToCIDRK8sPolicyYAML
 	}
 
+	fakeExternalTarget1 := tests.FakeExternalTarget1
+	fakeExternalTarget2 := tests.FakeExternalTarget2
+	if !param.ExternalTargetFakeDNS {
+		fakeExternalTarget1 = param.ExternalTarget
+		fakeExternalTarget2 = param.ExternalOtherTarget
+	}
 	renderedTemplates := map[string]string{}
 	for key, temp := range templates {
 		val, err := template.Render(temp, struct {
 			check.Parameters
-			ClusterNameLocal  string
-			ClusterNameRemote string
+			ClusterNameLocal        string
+			ClusterNameRemote       string
+			FakeExternalTarget      string
+			FakeExternalOtherTarget string
 		}{
-			Parameters:        param,
-			ClusterNameLocal:  clusterNameLocal,
-			ClusterNameRemote: clusterNameRemote,
+			Parameters:              param,
+			ClusterNameLocal:        clusterNameLocal,
+			ClusterNameRemote:       clusterNameRemote,
+			FakeExternalTarget:      fakeExternalTarget1,
+			FakeExternalOtherTarget: fakeExternalTarget2,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to render template %s: %w", key, err)

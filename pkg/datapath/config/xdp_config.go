@@ -5,12 +5,14 @@
 
 package config
 
-// BPFXDP is a configuration struct for a Cilium datapath object. Warning: do
-// not instantiate directly! Always use [NewBPFXDP] to ensure the default values
-// configured in the ELF are honored.
+import "github.com/cilium/cilium/pkg/datapath/types"
+
+// BPFXDP is a configuration struct for a Cilium datapath object.
+//
+// Warning: do not instantiate directly! Always use [NewBPFXDP] to ensure the
+// default values configured in the ELF are honored.
 type BPFXDP struct {
-	// MTU of the device the bpf program is attached to (default: MTU set in
-	// node_config.h by agent).
+	// MTU of the device the bpf program is attached to.
 	DeviceMTU uint16 `config:"device_mtu"`
 	// Pass traffic with extended IP protocols.
 	EnableExtendedIPProtocols bool `config:"enable_extended_ip_protocols"`
@@ -24,16 +26,28 @@ type BPFXDP struct {
 	EnableRemoteNodeMasquerade bool `config:"enable_remote_node_masquerade"`
 	// Enable XDP Prefilter.
 	EnableXDPPrefilter bool `config:"enable_xdp_prefilter"`
-	// Ephemeral port range minimun.
+	// Ephemeral port range minimum.
 	EphemeralMin uint16 `config:"ephemeral_min"`
+	// Enable hybrid mode routing based on subnet IDs.
+	HybridRoutingEnabled bool `config:"hybrid_routing_enabled"`
+	// IPv4 source prefix used for DSR IPIP RSS.
+	IPv4RSSPrefix types.V4Addr `config:"ipv4_rss_prefix"`
+	// Prefix length of the IPv4 DSR IPIP RSS source prefix.
+	IPv4RSSPrefixBits uint8 `config:"ipv4_rss_prefix_bits"`
+	// IPv6 source prefix used for DSR IPIP RSS.
+	IPv6RSSPrefix types.V6Addr `config:"ipv6_rss_prefix"`
+	// Prefix length of the IPv6 DSR IPIP RSS source prefix.
+	IPv6RSSPrefixBits uint8 `config:"ipv6_rss_prefix_bits"`
 	// Ifindex of the interface the bpf program is attached to.
 	InterfaceIfIndex uint32 `config:"interface_ifindex"`
 	// MAC address of the interface the bpf program is attached to.
-	InterfaceMAC [8]byte `config:"interface_mac"`
+	InterfaceMAC types.MACAddr `config:"interface_mac"`
 	// Masquerade address for IPv4 traffic.
-	NATIPv4Masquerade [4]byte `config:"nat_ipv4_masquerade"`
+	NATIPv4Masquerade types.V4Addr `config:"nat_ipv4_masquerade"`
 	// Masquerade address for IPv6 traffic.
-	NATIPv6Masquerade [16]byte `config:"nat_ipv6_masquerade"`
+	NATIPv6Masquerade types.V6Addr `config:"nat_ipv6_masquerade"`
+	// Whether to redirect to the proxy via cilium_net (hairpin) or via stack.
+	ProxyRedirectViaCiliumNet bool `config:"proxy_redirect_via_cilium_net"`
 	// Port number used for the overlay network.
 	TunnelPort uint16 `config:"tunnel_port"`
 	// The identifier of the tunnel protocol used for the overlay network.
@@ -43,8 +57,12 @@ type BPFXDP struct {
 }
 
 func NewBPFXDP(node Node) *BPFXDP {
-	return &BPFXDP{0x5dc, false, false, false, false, false, false, 0x0, 0x0, [8]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
-		[4]byte{0x0, 0x0, 0x0, 0x0},
-		[16]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0},
-		0x0, 0x0, node}
+	return &BPFXDP{0x0, false, false, false, false, false, false, 0x0, false, cast[types.V4Addr]([]byte{0x0, 0x0, 0x0, 0x0}),
+		0x20,
+		cast[types.V6Addr]([]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}),
+		0x80, 0x0,
+		cast[types.MACAddr]([]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}),
+		cast[types.V4Addr]([]byte{0x0, 0x0, 0x0, 0x0}),
+		cast[types.V6Addr]([]byte{0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0}),
+		false, 0x0, 0x0, node}
 }

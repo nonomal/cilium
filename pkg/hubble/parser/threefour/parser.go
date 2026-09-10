@@ -251,8 +251,7 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	ip := decoded.GetIP()
 	if tn != nil && ip != nil {
 		if !tn.OriginalIP().IsUnspecified() {
-			// Ignore invalid IP - getters will handle invalid value.
-			srcIP, _ = netipx.FromStdIP(tn.OriginalIP())
+			srcIP = tn.OriginalIP()
 			// On SNAT the trace notification has OrigIP set to the pre
 			// translation IP and the source IP parsed from the header is the
 			// post translation IP. The check is here because sometimes we get
@@ -287,6 +286,8 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	decoded.AuthType = authType
 	decoded.DropReason = decodeDropReason(dn, pvn)
 	decoded.DropReasonDesc = pb.DropReason(decoded.DropReason)
+	decoded.ExtError = decodeExtError(dn)
+	decoded.ExtDropReasonDesc = decodeExtDropReasonDesc(dn)
 	decoded.File = decodeFileInfo(dn)
 	decoded.Source = srcEndpoint
 	decoded.Destination = dstEndpoint
@@ -307,8 +308,8 @@ func (p *Parser) Decode(data []byte, decoded *pb.Flow) error {
 	decoded.Interface = p.decodeNetworkInterface(tn, dbg)
 	decoded.ProxyPort = decodeProxyPort(dbg, tn)
 
-	if p.correlateL3L4Policy && p.endpointGetter != nil {
-		correlation.CorrelatePolicy(p.log, p.endpointGetter, decoded)
+	if p.correlateL3L4Policy && p.endpointGetter != nil && pvn != nil {
+		correlation.CorrelatePolicy(p.log, p.endpointGetter, decoded, pvn.Source)
 	}
 
 	return nil
@@ -491,6 +492,23 @@ func decodeDropReason(dn *monitor.DropNotify, pvn *monitor.PolicyVerdictNotify) 
 		return uint32(-pvn.Verdict)
 	}
 	return 0
+}
+
+func decodeExtError(dn *monitor.DropNotify) int32 {
+	if dn != nil {
+		return int32(dn.ExtError)
+	}
+	return 0
+}
+
+func decodeExtDropReasonDesc(dn *monitor.DropNotify) string {
+	if dn == nil {
+		return ""
+	}
+	if dn.SubType == 0 && dn.ExtError == 0 {
+		return ""
+	}
+	return monitorAPI.DropReasonExt(dn.SubType, dn.ExtError)
 }
 
 func decodeFileInfo(dn *monitor.DropNotify) *pb.FileInfo {

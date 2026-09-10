@@ -6,12 +6,10 @@
 hive start
 
 # Configure v4 GoBGP server
-gobgp/add-server v4 65010 10.99.0.135 1790
-gobgp/add-peer -s v4 10.99.0.136 65001
+gobgp/add-server v4 v4.toml
 
 # Configure v6 GoBGP server
-gobgp/add-server v6 --router-id=1.2.3.4 65011 fd00::aa:bb:cc:135 1790
-gobgp/add-peer -s v6 fd00::aa:bb:cc:136 65001
+gobgp/add-server v6 v6.toml
 
 # Configure BGP on Cilium
 k8s/add cilium-node.yaml bgp-advertisement.yaml
@@ -48,6 +46,35 @@ gobgp/routes -s v6 -o routes.actual
 
 #####
 
+-- v4.toml --
+[global.config]
+  as = 65010
+  router-id = "10.99.0.135"
+  local-address-list = ["10.99.0.135"]
+  port = 1790
+
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "10.99.0.136"
+    peer-as = 65001
+  [neighbors.transport.config]
+    passive-mode = true
+-- v6.toml --
+[global.config]
+  as = 65011
+  router-id = "1.2.3.4"
+  local-address-list = ["fd00::aa:bb:cc:135"]
+  port = 1790
+
+[[neighbors]]
+  [neighbors.config]
+    neighbor-address = "fd00::aa:bb:cc:136"
+    peer-as = 65001
+  [neighbors.transport.config]
+    passive-mode = true
+  [[neighbors.afi-safis]]
+    [neighbors.afi-safis.config]
+      afi-safi-name = "ipv4-unicast"
 -- devices.yaml --
 index: 1
 name: test1
@@ -62,10 +89,16 @@ selected: true
 operstatus: up
 
 -- routes.yaml --
+# table 254 (main) / type 1 (unicast): auto-discovery only follows the node's
+# real default route, not one from an auxiliary table.
+table: 254
+type: 1
 linkindex: 1
 dst: 0.0.0.0/0
 gw: 10.99.0.135
 ---
+table: 254
+type: 1
 linkindex: 2
 dst: ::/0
 gw: fd00::aa:bb:cc:135
@@ -191,5 +224,5 @@ Prefix          NextHop       Attrs
 172.16.1.1/32   10.99.0.136   [{Origin: i} {AsPath: 65001} {Nexthop: 10.99.0.136}]
 -- gobgp-routes-v6.expected --
 Prefix          NextHop              Attrs
-10.244.0.0/24   fd00::aa:bb:cc:136   [{Origin: i} {AsPath: 65001} {MpReach(ipv4-unicast): {Nexthop: fd00::aa:bb:cc:136, NLRIs: [10.244.0.0/24]}}]
-172.16.1.1/32   fd00::aa:bb:cc:136   [{Origin: i} {AsPath: 65001} {MpReach(ipv4-unicast): {Nexthop: fd00::aa:bb:cc:136, NLRIs: [172.16.1.1/32]}}]
+10.244.0.0/24   fd00::aa:bb:cc:136   [{Origin: i} {AsPath: 65001} {MpReach(ipv4-unicast): {Nexthop: fd00::aa:bb:cc:136, NLRIs: [10.244.0.0/24:0]}}]
+172.16.1.1/32   fd00::aa:bb:cc:136   [{Origin: i} {AsPath: 65001} {MpReach(ipv4-unicast): {Nexthop: fd00::aa:bb:cc:136, NLRIs: [172.16.1.1/32:0]}}]

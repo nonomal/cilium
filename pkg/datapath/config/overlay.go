@@ -7,20 +7,19 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/byteorder"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/option"
 )
 
 // Overlay returns a [BPFOverlay].
-func Overlay(lnc *datapath.LocalNodeConfiguration, link netlink.Link) any {
+func Overlay(lnc *Config, link netlink.Link) any {
 	cfg := NewBPFOverlay(NodeConfig(lnc))
 
 	cfg.InterfaceIfIndex = uint32(link.Attrs().Index)
+	cfg.DeviceMTU = uint16(lnc.DeviceMTU)
 
-	em := mac.MAC(link.Attrs().HardwareAddr)
-	if len(em) == 6 {
-		cfg.InterfaceMAC = em.As8()
+	if em, err := mac.FromHardwareAddr(link.Attrs().HardwareAddr); err == nil {
+		cfg.InterfaceMAC.Addr = em
 	}
 
 	cfg.EnableExtendedIPProtocols = option.Config.EnableExtendedIPProtocols
@@ -31,15 +30,13 @@ func Overlay(lnc *datapath.LocalNodeConfiguration, link netlink.Link) any {
 		cfg.VTEPMask = byteorder.NetIPAddrToHost32(option.Config.VtepCidrMask)
 	}
 
-	cfg.EncryptionStrictIngress = option.Config.EnableEncryptionStrictModeIngress
-
 	cfg.EphemeralMin = lnc.EphemeralMin
 
 	cfg.TunnelProtocol = lnc.TunnelProtocol
 	cfg.TunnelPort = lnc.TunnelPort
 
-	cfg.EnableIPv4Fragments = option.Config.EnableIPv4 && option.Config.EnableIPv4FragmentsTracking
-	cfg.EnableIPv6Fragments = option.Config.EnableIPv6 && option.Config.EnableIPv6FragmentsTracking
+	cfg.EnableIPv4Fragments = option.Config.EnableIPv4FragmentsTracking
+	cfg.EnableIPv6Fragments = option.Config.EnableIPv6FragmentsTracking
 
 	return cfg
 }

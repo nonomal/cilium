@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+
+	"github.com/cilium/cilium/pkg/datapath/config/types"
 )
 
 var errDuplicateVariable = fmt.Errorf("duplicate variable")
@@ -69,14 +71,14 @@ func structToMap(obj any) (map[string]any, error) {
 		val = val.Elem()
 	}
 
-	fields, err := structFields(val, TagName, nil)
+	fields, err := structFields(val, types.ConstantTag, nil)
 	if err != nil {
 		return nil, err
 	}
 
 	vars := make(map[string]any, len(fields))
 	for _, field := range fields {
-		tag := field.Tag.Get(TagName)
+		tag := field.Tag.Get(types.ConstantTag)
 		if tag == "" {
 			return nil, fmt.Errorf("field %s has no tag", field.Name)
 		}
@@ -128,7 +130,7 @@ func structFields(structVal reflect.Value, tag string, visited map[reflect.Type]
 		// to a struct, attempt to gather its fields as well.
 		var v reflect.Value
 		switch field.Type.Kind() {
-		case reflect.Ptr:
+		case reflect.Pointer:
 			if field.Type.Elem().Kind() != reflect.Struct {
 				continue
 			}

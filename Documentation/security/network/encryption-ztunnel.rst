@@ -10,7 +10,7 @@
 Ztunnel Transparent Encryption (Beta)
 *************************************
 
-.. include:: ../../beta.rst
+.. include:: /beta.rst
 
 This guide explains how to configure Cilium to use ztunnel for transparent
 encryption and mutual TLS (mTLS) authentication between Cilium-managed endpoints.
@@ -62,7 +62,7 @@ Before you install Cilium with ztunnel enabled, ensure that:
 
        .. parsed-literal::
 
-          cilium install |CHART_VERSION| \\
+          cilium install --version |CHART_VERSION| \\
              --set encryption.enabled=true \\
              --set encryption.type=ztunnel
 
@@ -144,7 +144,7 @@ Validate the Setup
    processed by the enrollment reconciler.
 
 #. Run a ``bash`` shell in one of the Cilium pods hosting a mtls-enrolled pod with
-   ``kubectl -n kube-system exec -ti pod/<cillium-pod-hosting-mtls-pod> -- bash`` 
+   ``kubectl -n kube-system exec -ti pod/<cilium-pod-hosting-mtls-pod> -- bash``
    and execute the following commands:
 
    Install tcpdump

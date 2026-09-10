@@ -29,7 +29,6 @@ import (
 	k8sTesting "k8s.io/client-go/testing"
 
 	agentCmd "github.com/cilium/cilium/daemon/cmd"
-	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	datapathTables "github.com/cilium/cilium/pkg/datapath/tables"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client/testutils"
@@ -37,6 +36,7 @@ import (
 	k8stestutils "github.com/cilium/cilium/pkg/k8s/testutils"
 	"github.com/cilium/cilium/pkg/k8s/version"
 	"github.com/cilium/cilium/pkg/lock"
+	fakenode "github.com/cilium/cilium/pkg/node/fake"
 	"github.com/cilium/cilium/pkg/node/types"
 	agentOption "github.com/cilium/cilium/pkg/option"
 )
@@ -56,7 +56,7 @@ type ControlPlaneTest struct {
 	clients             *k8sClient.FakeClientset
 	trackers            []trackerAndDecoder
 	agentHandle         *agentHandle
-	FakeNodeHandler     *fakeTypes.FakeNodeHandler
+	FakeNodeHandler     *fakenode.Handler
 	establishedWatchers *lock.Map[string, struct{}]
 }
 
@@ -435,14 +435,6 @@ func filterList(obj k8sRuntime.Object, restrictions k8sTesting.ListRestrictions)
 		obj.Items = items
 	case *slim_corev1.NodeList:
 		items := make([]slim_corev1.Node, 0, len(obj.Items))
-		for i := range obj.Items {
-			if matchFieldSelector(&obj.Items[i], selector) {
-				items = append(items, obj.Items[i])
-			}
-		}
-		obj.Items = items
-	case *slim_corev1.EndpointsList:
-		items := make([]slim_corev1.Endpoints, 0, len(obj.Items))
 		for i := range obj.Items {
 			if matchFieldSelector(&obj.Items[i], selector) {
 				items = append(items, obj.Items[i])

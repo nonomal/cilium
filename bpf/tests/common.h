@@ -64,7 +64,7 @@
 #define TEST_SKIP 103
 
 /* Max number of cpus to check when doing percpu hash assertions */
-#define NR_CPUS 128
+#define MAX_ASSERT_CPUS 128
 
 /* Use an array map with 1 key and a large value size as buffer to write results */
 /* into. */
@@ -264,18 +264,37 @@ test_result_cursor = 0;
 #define CHECK(progtype, name) __section(progtype "/test/" name "/check")
 
 /* Asserts that the sum of per-cpu metrics map slots for a key equals count */
-#define assert_metrics_count(key, count) \
+#define assert_metrics_count(key, __count) \
 ({ \
 	struct metrics_value *__entry = NULL; \
 	__u64 sum = 0; \
 	/* Iterate until lookup encounters null when hitting cpu number */ \
 	/* Assumes at most 128 CPUS */ \
-	for (int i = 0; i < NR_CPUS; i++) { \
-		__entry = map_lookup_percpu_elem(&cilium_metrics, &key, i); \
+	for (int i = 0; i < MAX_ASSERT_CPUS; i++) { \
+		__entry = map_lookup_percpu_elem(&cilium_metrics, &(key), i); \
 		if (!__entry) { \
 			break; \
 		} \
 		sum += __entry->count; \
 	} \
-	assert(sum == count); \
+	assert(sum == (__count)); \
+})
+
+/* Asserts that the sum of per-cpu metrics map byte counters for a key equals
+ * bytes
+ */
+#define assert_metrics_bytes(key, __bytes) \
+({ \
+	struct metrics_value *__entry = NULL; \
+	__u64 sum = 0; \
+	/* Iterate until lookup encounters null when hitting cpu number */ \
+	/* Assumes at most 128 CPUS */ \
+	for (int i = 0; i < MAX_ASSERT_CPUS; i++) { \
+		__entry = map_lookup_percpu_elem(&cilium_metrics, &(key), i); \
+		if (!__entry) { \
+			break; \
+		} \
+		sum += __entry->bytes; \
+	} \
+	assert(sum == (__bytes)); \
 })

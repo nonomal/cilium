@@ -6,13 +6,11 @@ package connector
 import (
 	"fmt"
 	"log/slog"
-	"net"
 
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
-	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
 )
@@ -20,7 +18,7 @@ import (
 // setupNetkitPair sets up the host-facing interface, the peer interface and fills
 // up some endpoint fields such as mac, NodeMac, ifIndex and ifName. Returns a pointer
 // for the created netkit, a pointer for the peer link and error if something fails.
-func setupNetkitPair(defaultLogger *slog.Logger, cfg types.LinkConfig, l2Mode bool, sysctl sysctl.Sysctl) (*netlink.Netkit, netlink.Link, error) {
+func setupNetkitPair(defaultLogger *slog.Logger, cfg LinkConfig, l2Mode bool, sysctl sysctl.Sysctl) (*netlink.Netkit, netlink.Link, error) {
 	logger := defaultLogger.With(logfields.LogSubsys, "endpoint-connector")
 	var epHostMAC, epLXCMAC mac.MAC
 	var err error
@@ -51,7 +49,7 @@ func setupNetkitPair(defaultLogger *slog.Logger, cfg types.LinkConfig, l2Mode bo
 		LinkAttrs: netlink.LinkAttrs{
 			Name:         cfg.HostIfName,
 			TxQLen:       1000,
-			HardwareAddr: net.HardwareAddr(epHostMAC),
+			HardwareAddr: epHostMAC.HardwareAddr(),
 		},
 		Mode:       mode,
 		Policy:     netlink.NETKIT_POLICY_FORWARD,
@@ -70,7 +68,7 @@ func setupNetkitPair(defaultLogger *slog.Logger, cfg types.LinkConfig, l2Mode bo
 	}
 	peerAttr := &netlink.LinkAttrs{
 		Name:         cfg.PeerIfName,
-		HardwareAddr: net.HardwareAddr(epLXCMAC),
+		HardwareAddr: epLXCMAC.HardwareAddr(),
 	}
 	netkit.SetPeerAttrs(peerAttr)
 
@@ -113,7 +111,7 @@ func setupNetkitPair(defaultLogger *slog.Logger, cfg types.LinkConfig, l2Mode bo
 
 // validateNetkitPair queries the kernel for a copy of the underlying device attributes
 // for both the lxc host interface and the peer interface.
-func validateNetkitPair(logger *slog.Logger, cfg types.LinkConfig) (netlink.Link, error) {
+func validateNetkitPair(logger *slog.Logger, cfg LinkConfig) (netlink.Link, error) {
 	// Query the kernel for the host link attributes, so we can verify the kernel
 	// has applied the configuration we expected.
 	hostLink, err := safenetlink.LinkByName(cfg.HostIfName)
@@ -134,12 +132,6 @@ func validateNetkitPair(logger *slog.Logger, cfg types.LinkConfig) (netlink.Link
 	peerDevice, ok := peerLink.(*netlink.Netkit)
 	if !ok {
 		return nil, fmt.Errorf("peer link does not appear to be a Netkit device")
-	}
-
-	// Validate the kernel supports Scrub functionality.
-	if !hostDevice.SupportsScrub() || !peerDevice.SupportsScrub() {
-		logger.Warn("kernel does not support IFLA_NETKIT_SCRUB, some features may not work with netkit",
-			logfields.NetkitPair, []string{hostDevice.Name, peerDevice.Name})
 	}
 
 	// Verify we have the correct buffer margins configured. We accept a margin that

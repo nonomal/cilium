@@ -12,12 +12,15 @@ import (
 
 	"github.com/cilium/statedb"
 
-	"github.com/cilium/cilium/pkg/cidr"
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/common"
+	"github.com/cilium/cilium/pkg/datapath/config"
+	"github.com/cilium/cilium/pkg/datapath/connector"
+	ipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/types"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
+	plugin "github.com/cilium/cilium/pkg/datapath/plugins/types"
 	"github.com/cilium/cilium/pkg/datapath/tables"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/datapath/xdp"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/ip"
@@ -29,13 +32,9 @@ import (
 	"github.com/cilium/cilium/pkg/mtu"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
+	cslices "github.com/cilium/cilium/pkg/slices"
 	"github.com/cilium/cilium/pkg/svcrouteconfig"
 	wgTypes "github.com/cilium/cilium/pkg/wireguard/types"
-)
-
-const (
-	// AutoCIDR indicates that a CIDR should be allocated
-	AutoCIDR = "auto"
 )
 
 // newLocalNodeConfig constructs LocalNodeConfiguration from the global agent
@@ -51,9 +50,10 @@ const (
 // failing condition changes.
 func newLocalNodeConfig(
 	ctx context.Context,
-	config *option.DaemonConfig,
+	daemon *option.DaemonConfig,
 	localNode node.LocalNode,
 	sysctlOps sysctl.Sysctl,
+	clusterInfo cmtypes.ClusterInfo,
 	tunnelCfg tunnel.Config,
 	txn statedb.ReadTxn,
 	directRoutingDevTbl tables.DirectRoutingDevice,
@@ -66,33 +66,24 @@ func newLocalNodeConfig(
 	svcCfg svcrouteconfig.RoutesConfig,
 	maglevConfig maglev.Config,
 	mtuTbl statedb.Table[mtu.RouteMTU],
-	wgAgent wgTypes.WireguardAgent,
-	ipsecCfg datapath.IPsecConfig,
-	connectorConfig datapath.ConnectorConfig,
-) (datapath.LocalNodeConfiguration, <-chan struct{}, error) {
-	auxPrefixes := []*cidr.CIDR{}
+	wgAgent wgTypes.Agent,
+	ipsecCfg ipsec.Config,
+	connectorConfig connector.Config,
+	plugins plugin.Plugins,
+) (config.Config, <-chan struct{}, error) {
+	auxPrefixes := []ip.Prefix{}
 
-	if config.IPv4ServiceRange != AutoCIDR {
-		serviceCIDR, err := cidr.ParseCIDR(config.IPv4ServiceRange)
-		if err != nil {
-			return datapath.LocalNodeConfiguration{}, nil, fmt.Errorf("Invalid IPv4 service prefix %q: %w", config.IPv4ServiceRange, err)
-		}
-
-		auxPrefixes = append(auxPrefixes, serviceCIDR)
+	if daemon.IPv4ServiceRange.IsValid() {
+		auxPrefixes = append(auxPrefixes, ip.PrefixFrom(daemon.IPv4ServiceRange))
 	}
 
-	if config.IPv6ServiceRange != AutoCIDR {
-		serviceCIDR, err := cidr.ParseCIDR(config.IPv6ServiceRange)
-		if err != nil {
-			return datapath.LocalNodeConfiguration{}, nil, fmt.Errorf("Invalid IPv6 service prefix %q: %w", config.IPv6ServiceRange, err)
-		}
-
-		auxPrefixes = append(auxPrefixes, serviceCIDR)
+	if daemon.IPv6ServiceRange.IsValid() {
+		auxPrefixes = append(auxPrefixes, ip.PrefixFrom(daemon.IPv6ServiceRange))
 	}
 
 	nativeDevices, devsWatch := tables.SelectedDevices(devices, txn)
 	nodeAddrsIter, addrsWatch := nodeAddresses.AllWatch(txn)
-	mtuRoute, _, mtuWatch, _ := mtuTbl.GetWatch(txn, mtu.MTURouteIndex.Query(mtu.DefaultPrefixV4))
+	mtuRoute, _, mtuWatch, _ := mtuTbl.GetWatch(txn, mtu.MTURouteByPrefix(mtu.DefaultPrefixV4))
 
 	watchChans := []<-chan struct{}{devsWatch, addrsWatch, mtuWatch}
 	var directRoutingDevice *tables.Device
@@ -101,7 +92,15 @@ func newLocalNodeConfig(
 		if drd == nil {
 			// If the direct routing device is not present return the watch channel along with an error.
 			// Watch channel will be closed when there is an update to the DirectRouting device configuration.
-			return datapath.LocalNodeConfiguration{}, directRoutingDevWatch, errors.New("direct routing device required but not configured")
+			return config.Config{}, directRoutingDevWatch, errors.New("direct routing device required but not configured")
+		}
+
+		// Ensure the device has at least one usable address for the enabled
+		// address families. If not, return the watch channel so we retry as
+		// soon as the device's addresses change.
+		if !directRoutingDeviceHasAddr(drd) {
+			return config.Config{}, directRoutingDevWatch,
+				fmt.Errorf("direct routing device %s has no usable addresses", drd.Name)
 		}
 
 		watchChans = append(watchChans, directRoutingDevWatch)
@@ -113,38 +112,81 @@ func newLocalNodeConfig(
 		var err error
 		wgIndex, err = wgAgent.IfaceIndex()
 		if err != nil {
-			return datapath.LocalNodeConfiguration{}, nil, fmt.Errorf("getting Wireguard device index: %w", err)
+			return config.Config{}, nil, fmt.Errorf("getting Wireguard device index: %w", err)
 		}
 	}
 
 	ephemeralMin, err := getEphemeralPortRangeMin(sysctlOps)
 	if err != nil {
-		return datapath.LocalNodeConfiguration{}, nil, fmt.Errorf("getting ephemeral port range minimun: %w", err)
+		return config.Config{}, nil, fmt.Errorf("getting ephemeral port range minimun: %w", err)
 	}
 
 	hostEndpointID, _ := node.GetEndpointID()
 
-	ciliumHostDevice, _, hostWatch, ok := devices.GetWatch(txn, tables.DeviceNameIndex.Query(defaults.HostDevice))
+	ciliumHostDevice, _, hostWatch, ok := devices.GetWatch(txn, tables.DeviceByName(defaults.HostDevice))
 	if !ok {
-		return datapath.LocalNodeConfiguration{}, hostWatch, fmt.Errorf("failed to look up link '%s'", defaults.HostDevice)
+		return config.Config{}, hostWatch, fmt.Errorf("failed to look up link '%s'", defaults.HostDevice)
 	}
 	watchChans = append(watchChans, hostWatch)
 	ciliumHostMAC, err := mac.ParseMAC(ciliumHostDevice.HardwareAddr.String())
 	if err != nil {
-		return datapath.LocalNodeConfiguration{}, nil, fmt.Errorf("failed to parse hardware address of '%s': %w", defaults.HostDevice, err)
+		return config.Config{}, nil, fmt.Errorf("failed to parse hardware address of '%s': %w", defaults.HostDevice, err)
 	}
 
-	ciliumNetDevice, _, netWatch, ok := devices.GetWatch(txn, tables.DeviceNameIndex.Query(defaults.SecondHostDevice))
+	ciliumNetDevice, _, netWatch, ok := devices.GetWatch(txn, tables.DeviceByName(defaults.SecondHostDevice))
 	if !ok {
-		return datapath.LocalNodeConfiguration{}, netWatch, fmt.Errorf("failed to look up link '%s'", defaults.SecondHostDevice)
+		return config.Config{}, netWatch, fmt.Errorf("failed to look up link '%s'", defaults.SecondHostDevice)
 	}
 	watchChans = append(watchChans, netWatch)
 	ciliumNetMAC, err := mac.ParseMAC(ciliumNetDevice.HardwareAddr.String())
 	if err != nil {
-		return datapath.LocalNodeConfiguration{}, nil, fmt.Errorf("failed to parse hardware address of '%s': %w", defaults.SecondHostDevice, err)
+		return config.Config{}, nil, fmt.Errorf("failed to parse hardware address of '%s': %w", defaults.SecondHostDevice, err)
 	}
 
-	return datapath.LocalNodeConfiguration{
+	var encap4IfIndex, encap6IfIndex uint32
+	if daemon.UnsafeDaemonConfigOption.EnableIPIPDevices {
+		if daemon.EnableIPv4 {
+			dev, _, watch, ok := devices.GetWatch(txn, tables.DeviceByName(defaults.IPIPv4Device))
+			if !ok {
+				return config.Config{}, watch, fmt.Errorf("failed to look up IPv4 IPIP device '%s'", defaults.IPIPv4Device)
+			}
+			watchChans = append(watchChans, watch)
+			encap4IfIndex = uint32(dev.Index)
+		}
+		if daemon.EnableIPv6 {
+			dev, _, watch, ok := devices.GetWatch(txn, tables.DeviceByName(defaults.IPIPv6Device))
+			if !ok {
+				return config.Config{}, watch, fmt.Errorf("failed to look up IPv6 IPIP device '%s'", defaults.IPIPv6Device)
+			}
+			watchChans = append(watchChans, watch)
+			encap6IfIndex = uint32(dev.Index)
+		}
+	}
+
+	// Validate Encryption Strict Mode Egress
+	nodeIPv4 := ip.AddrFromIP(localNode.GetNodeIP(false))
+	if daemon.EnableEncryptionStrictModeEgress {
+		if !nodeIPv4.IsValid() {
+			return config.Config{}, nil, fmt.Errorf("unable to parse node IPv4 address %s", nodeIPv4)
+		}
+		if daemon.EncryptionStrictEgressCIDR.Contains(nodeIPv4) {
+			if !daemon.EncryptionStrictEgressAllowRemoteNodeIdentities {
+				return config.Config{}, nil, fmt.Errorf(`encryption strict mode is enabled but the node's IPv4 address
+				is within the strict CIDR range. This will cause the node to drop all traffic.
+				Please either disable encryption or set --encryption-strict-egress-allow-remote-node-identities=true`)
+			}
+		}
+	}
+
+	lbRSSCfg := loadbalancer.NewRSSConfig(
+		daemon.UnsafeDaemonConfigOption.LoadBalancerRSSv4,
+		daemon.UnsafeDaemonConfigOption.LoadBalancerRSSv6,
+		directRoutingDevice,
+	)
+
+	return config.Config{
+		ClusterID:                    localNode.ClusterID,
+		ClusterIDBits:                clusterInfo.GetClusterIDBits(),
 		NodeIPv4:                     ip.AddrFromIP(localNode.GetNodeIP(false)),
 		NodeIPv6:                     ip.AddrFromIP(localNode.GetNodeIP(true)),
 		CiliumInternalIPv4:           ip.AddrFromIP(localNode.GetCiliumInternalIP(false)),
@@ -153,38 +195,40 @@ func newLocalNodeConfig(
 		CiliumNetMAC:                 ciliumNetMAC,
 		CiliumHostIfIndex:            uint32(ciliumHostDevice.Index),
 		CiliumHostMAC:                ciliumHostMAC,
-		AllocCIDRIPv4:                localNode.IPv4AllocCIDR,
-		AllocCIDRIPv6:                localNode.IPv6AllocCIDR,
-		NativeRoutingCIDRIPv4:        datapath.RemoteSNATDstAddrExclusionCIDRv4(localNode),
-		NativeRoutingCIDRIPv6:        datapath.RemoteSNATDstAddrExclusionCIDRv6(localNode),
+		NativeRoutingCIDRIPv4:        localNode.RemoteSNATDstAddrExclusionCIDRv4(),
+		NativeRoutingCIDRIPv6:        localNode.RemoteSNATDstAddrExclusionCIDRv6(),
 		ServiceLoopbackIPv4:          localNode.Local.ServiceLoopbackIPv4,
 		ServiceLoopbackIPv6:          localNode.Local.ServiceLoopbackIPv6,
 		Devices:                      nativeDevices,
 		NodeAddresses:                statedb.Collect(nodeAddrsIter),
 		DirectRoutingDevice:          directRoutingDevice,
+		LoadBalancerRSS:              lbRSSCfg,
 		DeriveMasqIPAddrFromDevice:   masqInterface,
 		HostEndpointID:               hostEndpointID,
 		DeviceMTU:                    mtuRoute.DeviceMTU,
 		RouteMTU:                     mtuRoute.RouteMTU,
 		RoutePostEncryptMTU:          mtuRoute.RoutePostEncryptMTU,
 		AuxiliaryPrefixes:            auxPrefixes,
-		EnableIPv4:                   config.EnableIPv4,
-		EnableIPv6:                   config.EnableIPv6,
-		EnableEncapsulation:          config.TunnelingEnabled(),
+		EnableIPv4:                   daemon.EnableIPv4,
+		EnableIPv6:                   daemon.EnableIPv6,
+		EnableEncapsulation:          daemon.TunnelingEnabled(),
+		Encap4IfIndex:                encap4IfIndex,
+		Encap6IfIndex:                encap6IfIndex,
+		RequiresNativeRouting:        daemon.RequiresNativeRouting(),
 		TunnelProtocol:               tunnelCfg.EncapProtocol().ToDpID(),
 		TunnelPort:                   tunnelCfg.Port(),
-		EnableAutoDirectRouting:      config.EnableAutoDirectRouting,
+		EnableAutoDirectRouting:      daemon.EnableAutoDirectRouting,
 		EphemeralMin:                 uint16(ephemeralMin),
-		DirectRoutingSkipUnreachable: config.DirectRoutingSkipUnreachable,
-		EnableLocalNodeRoute:         config.EnableLocalNodeRoute && config.IPAM != ipamOption.IPAMENI && config.IPAM != ipamOption.IPAMAzure && config.IPAM != ipamOption.IPAMAlibabaCloud,
+		DirectRoutingSkipUnreachable: daemon.DirectRoutingSkipUnreachable,
+		EnableLocalNodeRoute:         daemon.EnableLocalNodeRoute && daemon.IPAM != ipamOption.IPAMENI && daemon.IPAM != ipamOption.IPAMAzure && daemon.IPAM != ipamOption.IPAMAlibabaCloud,
 		EnableWireguard:              wgAgent.Enabled(),
-		EnablePolicyAccounting:       config.PolicyAccounting,
+		EnablePolicyAccounting:       daemon.PolicyAccounting,
 		WireguardIfIndex:             wgIndex,
 		EnableIPSec:                  ipsecCfg.Enabled(),
-		EncryptNode:                  config.EncryptNode,
-		EnableConntrackAccounting:    config.BPFConntrackAccounting,
-		IPv4PodSubnets:               cidr.NewCIDRSlice(config.IPv4PodSubnets),
-		IPv6PodSubnets:               cidr.NewCIDRSlice(config.IPv6PodSubnets),
+		EncryptNode:                  daemon.EncryptNode,
+		EnableConntrackAccounting:    daemon.BPFConntrackAccounting,
+		IPv4PodSubnets:               cslices.Map(daemon.IPv4PodSubnets, ip.PrefixFrom),
+		IPv6PodSubnets:               cslices.Map(daemon.IPv6PodSubnets, ip.PrefixFrom),
 		XDPConfig:                    xdpConfig,
 		LBConfig:                     lbConfig,
 		KPRConfig:                    kprCfg,
@@ -192,6 +236,7 @@ func newLocalNodeConfig(
 		MaglevConfig:                 maglevConfig,
 		DatapathIsLayer2:             connectorConfig.GetOperationalMode().IsLayer2(),
 		DatapathIsNetkit:             connectorConfig.GetOperationalMode().IsNetkit(),
+		Plugins:                      plugins,
 	}, common.MergeChannels(watchChans...), nil
 }
 
@@ -213,4 +258,21 @@ func getEphemeralPortRangeMin(sysctl sysctl.Sysctl) (int, error) {
 	}
 
 	return ephemeralPortMin, nil
+}
+
+// directRoutingDeviceHasAddr returns true if the device has at least one
+// usable address for the enabled address families.
+func directRoutingDeviceHasAddr(dev *tables.Device) bool {
+	for _, addr := range dev.Addrs {
+		if addr.Addr.IsUnspecified() {
+			continue
+		}
+		if option.Config.EnableIPv4 && addr.Addr.Is4() {
+			return true
+		}
+		if option.Config.EnableIPv6 && addr.Addr.Is6() {
+			return true
+		}
+	}
+	return false
 }

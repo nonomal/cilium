@@ -10,17 +10,53 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/datapath/link"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
-	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/netns"
 )
+
+// LinkConfig contains the GRO/GSO, MTU values and buffer margins to be configured on
+// both sides of the created veth or netkit pair.
+type LinkConfig struct {
+	// EndpointID defines the container ID to which we are creating a new
+	// linkpair. Set this if you want the connector to generate interface
+	// names itself. Otherwise, set HostIfName and PeerIfName.
+	EndpointID string
+
+	// HostIfName defines the interface name as seen in the host namespace.
+	HostIfName string
+
+	// PeerIfName defines the interface name as seen in the container namespace.
+	PeerIfName string
+
+	// PeerNamespace defines the namespace the peer link should be moved into.
+	PeerNamespace *netns.NetNS
+
+	GROIPv6MaxSize int
+	GSOIPv6MaxSize int
+
+	GROIPv4MaxSize int
+	GSOIPv4MaxSize int
+
+	DeviceMTU      int
+	DeviceHeadroom uint16
+	DeviceTailroom uint16
+}
+
+type LinkPair interface {
+	GetHostLink() netlink.Link
+	GetPeerLink() netlink.Link
+	GetMode() Mode
+	Delete() error
+}
 
 func NewLinkPair(
 	log *slog.Logger,
-	mode types.ConnectorMode,
-	cfg types.LinkConfig,
+	mode Mode,
+	cfg LinkConfig,
 	sysctl sysctl.Sysctl,
-) (*LinkPair, error) {
+) (*linkPair, error) {
 	log.Debug("Creating new linkpair",
 		logfields.LinkConfig, cfg,
 		logfields.DatapathMode, mode,
@@ -43,21 +79,21 @@ func NewLinkPair(
 	var err error
 
 	switch mode {
-	case types.ConnectorModeVeth:
+	case ModeVeth:
 		hostLink, peerLink, err = setupVethPair(
 			log,
 			cfg,
 			sysctl,
 		)
 
-	case types.ConnectorModeNetkit:
+	case ModeNetkit:
 		hostLink, peerLink, err = setupNetkitPair(
 			log,
 			cfg,
 			false,
 			sysctl,
 		)
-	case types.ConnectorModeNetkitL2:
+	case ModeNetkitL2:
 		hostLink, peerLink, err = setupNetkitPair(
 			log,
 			cfg,
@@ -99,25 +135,34 @@ func NewLinkPair(
 	}
 
 	// Rename the peer link, if we generated a temporary name earlier
-	if finalPeerIfName != "" && finalPeerIfName != cfg.PeerIfName {
-		rename := func() error {
-			if err := link.Rename(cfg.PeerIfName, finalPeerIfName); err != nil {
-				return fmt.Errorf("failed to rename link from %s to %s: %w", cfg.PeerIfName, finalPeerIfName, err)
-			}
-			return nil
-		}
+	finalPeerIfName, err = renameIfNeeded(finalPeerIfName, cfg.PeerIfName, cfg.PeerNamespace)
+	if err != nil {
+		return nil, err
+	}
 
-		if cfg.PeerNamespace != nil {
-			err = cfg.PeerNamespace.Do(func() error { return rename() })
-		} else {
-			err = rename()
+	if err := markOwned(cfg.PeerNamespace, finalPeerIfName); err != nil {
+		log.Warn("unable to mark peer link cilium ownership",
+			logfields.Error, err,
+			logfields.Name, finalPeerIfName,
+		)
+	}
+
+	// re-generate the peer Link as the previous one is likely stale
+	if cfg.PeerNamespace != nil {
+		if err := cfg.PeerNamespace.Do(func() error {
+			peerLink, err = safenetlink.LinkByName(finalPeerIfName)
+			return err
+		}); err != nil {
+			return nil, err
 		}
+	} else {
+		peerLink, err = safenetlink.LinkByName(finalPeerIfName)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	pair := &LinkPair{
+	pair := &linkPair{
 		hostLink: hostLink,
 		peerLink: peerLink,
 		mode:     mode,
@@ -125,7 +170,7 @@ func NewLinkPair(
 	return pair, nil
 }
 
-func configureLinkPair(hostSide, endpointSide netlink.Link, cfg types.LinkConfig) error {
+func configureLinkPair(hostSide, endpointSide netlink.Link, cfg LinkConfig) error {
 	var err error
 	epIfName := endpointSide.Attrs().Name
 	hostIfName := hostSide.Attrs().Name
@@ -188,7 +233,7 @@ func configureLinkPair(hostSide, endpointSide netlink.Link, cfg types.LinkConfig
 	return nil
 }
 
-func DeleteLinkPair(cfg types.LinkConfig) error {
+func DeleteLinkPair(cfg LinkConfig) error {
 	if cfg.EndpointID != "" {
 		cfg.HostIfName = Endpoint2IfName(cfg.EndpointID)
 	} else if cfg.HostIfName == "" {
@@ -202,30 +247,77 @@ func DeleteLinkPair(cfg types.LinkConfig) error {
 	return nil
 }
 
-type LinkPair struct {
+type linkPair struct {
 	hostLink netlink.Link
 	peerLink netlink.Link
-	mode     types.ConnectorMode
+	mode     Mode
 }
 
-func (lp *LinkPair) GetHostLink() netlink.Link {
+func (lp *linkPair) GetHostLink() netlink.Link {
 	return lp.hostLink
 }
 
-func (lp *LinkPair) GetPeerLink() netlink.Link {
+func (lp *linkPair) GetPeerLink() netlink.Link {
 	return lp.peerLink
 }
 
-func (lp *LinkPair) GetMode() types.ConnectorMode {
+func (lp *linkPair) GetMode() Mode {
 	return lp.mode
 }
 
-func (lp *LinkPair) Delete() error {
+func (lp *linkPair) Delete() error {
 	if lp.hostLink != nil {
 		if err := netlink.LinkDel(lp.hostLink); err != nil {
 			return fmt.Errorf("delete linkpair %q failed: %w", lp.hostLink.Attrs().Name, err)
 		}
-		*lp = LinkPair{}
+		*lp = linkPair{}
 	}
 	return nil
+}
+
+// renameIfNeeded renames the link, if needed. also returns the desired interface name.
+func renameIfNeeded(finalName, currentName string, ns *netns.NetNS) (string, error) {
+	// nsDo runs `f` within namespace context if necessary
+	nsDo := func(f func() error) error {
+		if ns != nil {
+			return ns.Do(f)
+		}
+
+		return f()
+	}
+
+	// if finalName is empty OR it matches currentName, just try returning
+	// the existing link.
+	if finalName == "" || finalName == currentName {
+		return currentName, nil
+	}
+
+	rename := func() error {
+		err := link.Rename(currentName, finalName)
+		if err != nil {
+			return fmt.Errorf("failed to rename link from %s to %s: %w", currentName, finalName, err)
+		}
+
+		return nil
+	}
+
+	if err := nsDo(rename); err != nil {
+		return "", err
+	}
+
+	return finalName, nil
+}
+
+// markOwned marks interface at `ifName` inside `ns` context
+// as cilium owned by writing to the link altname.
+func markOwned(ns *netns.NetNS, ifName string) error {
+	markFunc := func() error {
+		return link.AddAltName(ifName, CniAltName(ifName))
+	}
+
+	if ns != nil {
+		return ns.Do(markFunc)
+	}
+
+	return markFunc()
 }

@@ -29,8 +29,10 @@ import (
 	"sigs.k8s.io/yaml"
 
 	"github.com/cilium/cilium/api/v1/models"
-	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+	fakeipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/fake"
 	"github.com/cilium/cilium/pkg/endpoint"
+	endpointtypes "github.com/cilium/cilium/pkg/endpoint/types"
 	fqdndns "github.com/cilium/cilium/pkg/fqdn/dns"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
@@ -44,17 +46,20 @@ import (
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/policy/api"
+	"github.com/cilium/cilium/pkg/policy/compute"
 	"github.com/cilium/cilium/pkg/policy/types"
 	"github.com/cilium/cilium/pkg/source"
 	"github.com/cilium/cilium/pkg/testutils"
+	testcompute "github.com/cilium/cilium/pkg/testutils/compute"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
-	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 	testpolicy "github.com/cilium/cilium/pkg/testutils/policy"
 	"github.com/cilium/cilium/pkg/u8proto"
+	fakewireguard "github.com/cilium/cilium/pkg/wireguard/fake"
 )
 
 type DNSProxyTestSuite struct {
 	repo         policy.PolicyRepository
+	fetcher      compute.PolicyRecomputer
 	dnsTCPClient *dns.Client
 	dnsServer    *dns.Server
 	proxy        *DNSProxy
@@ -79,7 +84,8 @@ func setupDNSProxyTestSuite(tb testing.TB) *DNSProxyTestSuite {
 	}, nil, wg)
 	wg.Wait()
 
-	s.repo = policy.NewPolicyRepository(logger, nil, nil, nil, nil, testpolicy.NewPolicyMetricsNoop())
+	s.repo = policy.NewPolicyRepository(logger, cmtypes.DefaultClusterInfo, nil, nil, nil, nil, testpolicy.NewPolicyMetricsNoop())
+	s.fetcher = testcompute.InstantiateCellForTesting(tb, logger, "endpoint", "setupDNSProxyTestSuite", s.repo, identitymanager.NewIDManager(logger))
 	s.dnsTCPClient = &dns.Client{Net: "tcp", Timeout: time.Second, SingleInflight: true}
 	s.dnsServer = setupServer(tb)
 	require.NotNil(tb, s.dnsServer, "unable to setup DNS server")
@@ -96,7 +102,7 @@ func setupDNSProxyTestSuite(tb testing.TB) *DNSProxyTestSuite {
 	}
 	proxy := NewDNSProxy(dnsProxyConfig,
 		s,
-		func(lookupTime time.Time, ep *endpoint.Endpoint, epIPPort string, serverID identity.NumericIdentity, dstAddr netip.AddrPort, msg *dns.Msg, protocol string, allowed bool, stat *ProxyRequestContext) error {
+		func(lookupTime time.Time, ep *endpoint.Endpoint, epIPPort string, serverID identity.NumericIdentity, dstAddr netip.AddrPort, details *MsgDetails, protocol string, allowed bool, stat *ProxyRequestContext) error {
 			return nil
 		},
 	)
@@ -165,22 +171,26 @@ func (s *DNSProxyTestSuite) LookupByIdentity(nid identity.NumericIdentity) []str
 	}
 }
 
+func makeProxyTestEndpointParams(logger *slog.Logger, repo policy.PolicyRepository, fetcher compute.PolicyRecomputer) endpoint.EndpointParams {
+	return endpoint.EndpointParams{
+		Logger:          logger,
+		EPBuildQueue:    &endpoint.MockEndpointBuildQueue{},
+		PolicyRepo:      repo,
+		PolicyFetcher:   fetcher,
+		IdentityManager: identitymanager.NewIDManager(logger),
+		IPSecConfig:     fakeipsec.Config{},
+		WgConfig:        fakewireguard.Config{},
+		CTMapGC:         ctmap.NewFakeGCRunner(),
+		Allocator:       testidentity.NewMockIdentityAllocator(nil),
+	}
+}
+
 func (s *DNSProxyTestSuite) LookupRegisteredEndpoint(ip netip.Addr) (*endpoint.Endpoint, bool, error) {
 	if s.restoring {
 		return nil, false, fmt.Errorf("No EPs available when restoring")
 	}
 	model := newTestEndpointModel(int(epID1), endpoint.StateReady)
-	ep, err := endpoint.NewEndpointFromChangeModel(endpoint.EndpointParams{
-		EPBuildQueue:     &endpoint.MockEndpointBuildQueue{},
-		NamedPortsGetter: testipcache.NewMockIPCache(),
-		Allocator:        testidentity.NewMockIdentityAllocator(nil),
-		CTMapGC:          ctmap.NewFakeGCRunner(),
-		WgConfig:         &fakeTypes.WireguardConfig{},
-		IPSecConfig:      fakeTypes.IPsecConfig{},
-		Logger:           s.logger,
-		IdentityManager:  identitymanager.NewIDManager(s.logger),
-		PolicyRepo:       s.repo,
-	}, nil, &endpoint.FakeEndpointProxy{}, model, nil)
+	ep, err := endpoint.NewEndpointFromChangeModel(makeProxyTestEndpointParams(s.logger, s.repo, s.fetcher), nil, &endpoint.FakeEndpointProxy{}, model, nil)
 	ep.Start(uint16(model.ID))
 	defer ep.Stop()
 	return ep, false, err
@@ -219,7 +229,7 @@ func serveDNS(w dns.ResponseWriter, r *dns.Msg) {
 // Setup identities, ports and endpoint IDs we will need
 var (
 	// slogloggercheck: the default logger is enough for tests.
-	cacheAllocator = cache.NewCachingIdentityAllocator(logging.DefaultSlogLogger, &testidentity.IdentityAllocatorOwnerMock{}, cache.AllocatorConfig{})
+	cacheAllocator = cache.NewCachingIdentityAllocator(logging.DefaultSlogLogger, &testidentity.IdentityAllocatorOwnerMock{}, cache.NewTestAllocatorConfig())
 	// slogloggercheck: the default logger is enough for tests.
 	testSelectorCache       = policy.NewSelectorCache(logging.DefaultSlogLogger, cacheAllocator.GetIdentityCache())
 	dummySelectorCacheUser  = &testpolicy.DummySelectorCacheUser{}
@@ -579,7 +589,6 @@ func assertRulesEqual(t *testing.T, da, db restore.DNSRules) {
 }
 
 func TestPrivilegedFullPathDependence(t *testing.T) {
-	logger := hivetest.Logger(t)
 	s := setupDNSProxyTestSuite(t)
 
 	// Test that we consider each of endpoint ID, destination SecID (via the
@@ -905,17 +914,7 @@ func TestPrivilegedFullPathDependence(t *testing.T) {
 
 	// Restore rules
 	model := newTestEndpointModel(int(epID1), endpoint.StateReady)
-	ep1, err := endpoint.NewEndpointFromChangeModel(endpoint.EndpointParams{
-		EPBuildQueue:     &endpoint.MockEndpointBuildQueue{},
-		NamedPortsGetter: testipcache.NewMockIPCache(),
-		Allocator:        testidentity.NewMockIdentityAllocator(nil),
-		CTMapGC:          ctmap.NewFakeGCRunner(),
-		WgConfig:         &fakeTypes.WireguardConfig{},
-		IPSecConfig:      fakeTypes.IPsecConfig{},
-		Logger:           hivetest.Logger(t),
-		IdentityManager:  identitymanager.NewIDManager(logger),
-		PolicyRepo:       s.repo,
-	}, nil, &endpoint.FakeEndpointProxy{}, model, nil)
+	ep1, err := endpoint.NewEndpointFromChangeModel(makeProxyTestEndpointParams(hivetest.Logger(t), s.repo, s.fetcher), nil, &endpoint.FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
 
 	ep1.Start(uint16(model.ID))
@@ -967,17 +966,7 @@ func TestPrivilegedFullPathDependence(t *testing.T) {
 
 	// Restore rules for epID3
 	modelEP3 := newTestEndpointModel(int(epID3), endpoint.StateReady)
-	ep3, err := endpoint.NewEndpointFromChangeModel(endpoint.EndpointParams{
-		EPBuildQueue:     &endpoint.MockEndpointBuildQueue{},
-		NamedPortsGetter: testipcache.NewMockIPCache(),
-		Allocator:        testidentity.NewMockIdentityAllocator(nil),
-		CTMapGC:          ctmap.NewFakeGCRunner(),
-		WgConfig:         &fakeTypes.WireguardConfig{},
-		IPSecConfig:      fakeTypes.IPsecConfig{},
-		Logger:           hivetest.Logger(t),
-		IdentityManager:  identitymanager.NewIDManager(logger),
-		PolicyRepo:       s.repo,
-	}, nil, &endpoint.FakeEndpointProxy{}, model, nil)
+	ep3, err := endpoint.NewEndpointFromChangeModel(makeProxyTestEndpointParams(hivetest.Logger(t), s.repo, s.fetcher), nil, &endpoint.FakeEndpointProxy{}, modelEP3, nil)
 	require.NoError(t, err)
 
 	ep3.Start(uint16(modelEP3.ID))
@@ -1123,7 +1112,6 @@ func TestPrivilegedFullPathDependence(t *testing.T) {
 }
 
 func TestPrivilegedRestoredEndpoint(t *testing.T) {
-	logger := hivetest.Logger(t)
 	s := setupDNSProxyTestSuite(t)
 
 	// Respond with an actual answer for the query. This also tests that the
@@ -1189,17 +1177,7 @@ func TestPrivilegedRestoredEndpoint(t *testing.T) {
 	// restore rules, set the mock to restoring state
 	s.restoring = true
 	model := newTestEndpointModel(int(epID1), endpoint.StateReady)
-	ep1, err := endpoint.NewEndpointFromChangeModel(endpoint.EndpointParams{
-		EPBuildQueue:     &endpoint.MockEndpointBuildQueue{},
-		NamedPortsGetter: testipcache.NewMockIPCache(),
-		Allocator:        testidentity.NewMockIdentityAllocator(nil),
-		CTMapGC:          ctmap.NewFakeGCRunner(),
-		WgConfig:         &fakeTypes.WireguardConfig{},
-		IPSecConfig:      fakeTypes.IPsecConfig{},
-		Logger:           hivetest.Logger(t),
-		IdentityManager:  identitymanager.NewIDManager(logger),
-		PolicyRepo:       s.repo,
-	}, nil, &endpoint.FakeEndpointProxy{}, model, nil)
+	ep1, err := endpoint.NewEndpointFromChangeModel(makeProxyTestEndpointParams(hivetest.Logger(t), s.repo, s.fetcher), nil, &endpoint.FakeEndpointProxy{}, model, nil)
 	require.NoError(t, err)
 
 	ep1.Start(uint16(model.ID))
@@ -1282,7 +1260,85 @@ func TestProxyRequestContext_IsTimeout(t *testing.T) {
 	require.True(t, p.IsTimeout())
 }
 
-func TestExtractMsgDetails(t *testing.T) {
+func TestExtractRequestMsgDetails(t *testing.T) {
+	testCases := []struct {
+		name    string
+		msg     *dns.Msg
+		qname   string
+		qtypes  []uint16
+		wantErr bool
+	}{
+		{
+			name:    "empty message",
+			msg:     &dns.Msg{},
+			wantErr: true,
+		},
+		{
+			name: "valid A request",
+			msg: &dns.Msg{
+				Question: []dns.Question{{
+					Name:  fqdndns.FQDN("cilium.io"),
+					Qtype: dns.TypeA,
+				}},
+			},
+			qname:   "cilium.io.",
+			qtypes:  []uint16{dns.TypeA},
+			wantErr: false,
+		},
+		{
+			name: "valid AAAA request",
+			msg: &dns.Msg{
+				Question: []dns.Question{{
+					Name:  fqdndns.FQDN("cilium.io"),
+					Qtype: dns.TypeAAAA,
+				}},
+			},
+			qname:   "cilium.io.",
+			qtypes:  []uint16{dns.TypeAAAA},
+			wantErr: false,
+		},
+		{
+			name: "request with spoofed answer section is ignored",
+			msg: &dns.Msg{
+				Question: []dns.Question{{
+					Name:  fqdndns.FQDN("cilium.io"),
+					Qtype: dns.TypeA,
+				}},
+				Answer: []dns.RR{&dns.A{
+					Hdr: dns.RR_Header{
+						Name: fqdndns.FQDN("cilium.io"),
+						Ttl:  3600,
+					},
+					A: net.ParseIP("192.0.2.3"),
+				}},
+			},
+			qname:   "cilium.io.",
+			qtypes:  []uint16{dns.TypeA},
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			details, err := ExtractRequestMsgDetails(tc.msg)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.qname, details.QName)
+			require.Equal(t, tc.qtypes, details.QTypes)
+			require.False(t, details.Response)
+			// Request extraction must not populate response fields
+			require.Nil(t, details.ResponseIPs)
+			require.Nil(t, details.CNAMEs)
+			require.Nil(t, details.AnswerTypes)
+			require.Equal(t, uint32(0), details.TTL)
+		})
+	}
+}
+
+func TestExtractResponseMsgDetails(t *testing.T) {
 	testCases := []struct {
 		msg     *dns.Msg
 		ttl     uint32
@@ -1463,15 +1519,15 @@ func TestExtractMsgDetails(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		_, _, ttl, cnames, _, _, _, err := ExtractMsgDetails(tc.msg)
+		details, err := ExtractResponseMsgDetails(tc.msg)
 		if tc.wantErr {
 			require.Error(t, err)
 		} else {
 			require.NoError(t, err)
 		}
 
-		require.Equal(t, tc.ttl, ttl)
-		require.Equal(t, tc.cnames, cnames)
+		require.Equal(t, tc.ttl, details.TTL)
+		require.Equal(t, tc.cnames, details.CNAMEs)
 	}
 }
 
@@ -1711,7 +1767,7 @@ func newTestEndpointModel(id int, state endpoint.State) *models.EndpointChangeRe
 		ID:    int64(id),
 		State: ptr.To(models.EndpointState(state)),
 		Properties: map[string]any{
-			endpoint.PropertyFakeEndpoint: true,
+			endpointtypes.PropertyFakeEndpoint: true,
 		},
 	}
 }

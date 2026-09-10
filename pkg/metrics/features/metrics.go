@@ -5,12 +5,16 @@ package features
 
 import (
 	"fmt"
+	"reflect"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	bgpConfig "github.com/cilium/cilium/pkg/bgp/config"
 	"github.com/cilium/cilium/pkg/clustermesh"
 	"github.com/cilium/cilium/pkg/clustermesh/types"
+	ipsec "github.com/cilium/cilium/pkg/datapath/linux/ipsec/types"
 	datapathOption "github.com/cilium/cilium/pkg/datapath/option"
 	"github.com/cilium/cilium/pkg/datapath/tunnel"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/defaults"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/kpr"
@@ -62,7 +66,6 @@ type Metrics struct {
 	NPToFQDNsIngested           metric.Vec[metric.Counter]
 	NPHTTPIngested              metric.Vec[metric.Counter]
 	NPHTTPHeaderMatchesIngested metric.Vec[metric.Counter]
-	NPOtherL7Ingested           metric.Vec[metric.Counter]
 	NPDenyPoliciesIngested      metric.Vec[metric.Counter]
 	NPIngressCIDRGroupIngested  metric.Vec[metric.Counter]
 	NPMutualAuthIngested        metric.Vec[metric.Counter]
@@ -723,24 +726,6 @@ func NewMetrics(withDefaults bool, withEnvVersion bool) Metrics {
 			},
 		}),
 
-		NPOtherL7Ingested: metric.NewCounterVecWithLabels(metric.CounterOpts{
-			Help:      "Other L7 Policies have been ingested since the agent started",
-			Namespace: metrics.Namespace,
-			Subsystem: subsystemNP,
-			Name:      "other_l7_policies_total",
-		}, metric.Labels{
-			{
-				Name: "action", Values: func() metric.Values {
-					if !withDefaults {
-						return nil
-					}
-					return metric.NewValues(
-						defaultActions...,
-					)
-				}(),
-			},
-		}),
-
 		NPDenyPoliciesIngested: metric.NewCounterVecWithLabels(metric.CounterOpts{
 			Help:      "Deny Policies have been ingested since the agent started",
 			Namespace: metrics.Namespace,
@@ -988,10 +973,11 @@ func NewMetrics(withDefaults bool, withEnvVersion bool) Metrics {
 }
 
 type featureMetrics interface {
-	update(params enabledFeatures, config *option.DaemonConfig, lbConfig loadbalancer.Config, kprCfg kpr.KPRConfig, wgCfg wgTypes.WireguardConfig, ipsecCfg datapath.IPsecConfig)
+	update(params enabledFeatures, config *option.DaemonConfig, lbConfig loadbalancer.Config, kprCfg kpr.KPRConfig, wgCfg wgTypes.Config, ipsecCfg ipsec.Config, bgpCfg bgpConfig.BGPConfig)
+	toGatherer() (prometheus.Gatherer, error)
 }
 
-func (m Metrics) update(params enabledFeatures, config *option.DaemonConfig, lbConfig loadbalancer.Config, kprCfg kpr.KPRConfig, wgCfg wgTypes.WireguardConfig, ipsecCfg datapath.IPsecConfig) {
+func (m Metrics) update(params enabledFeatures, config *option.DaemonConfig, lbConfig loadbalancer.Config, kprCfg kpr.KPRConfig, wgCfg wgTypes.Config, ipsecCfg ipsec.Config, bgpCfg bgpConfig.BGPConfig) {
 	networkMode := networkModeDirectRouting
 	if config.TunnelingEnabled() {
 		switch params.TunnelProtocol() {
@@ -1084,7 +1070,7 @@ func (m Metrics) update(params enabledFeatures, config *option.DaemonConfig, lbC
 
 	m.ACLBNodePortConfig.WithLabelValues(lbConfig.LBMode, lbConfig.LBAlgorithm, config.NodePortAcceleration).Set(1)
 
-	if config.EnableBGPControlPlane {
+	if bgpCfg.Enable {
 		m.ACLBBGPEnabled.Set(1)
 	}
 
@@ -1110,11 +1096,11 @@ func (m Metrics) update(params enabledFeatures, config *option.DaemonConfig, lbC
 
 	var bigTCPProto string
 	switch {
-	case params.BigTCPConfig().IsIPv4Enabled() && params.BigTCPConfig().IsIPv6Enabled():
+	case params.BigTCPFeatures().IsIPv4Enabled() && params.BigTCPFeatures().IsIPv6Enabled():
 		bigTCPProto = advConnBigTCPDualStack
-	case params.BigTCPConfig().IsIPv4Enabled():
+	case params.BigTCPFeatures().IsIPv4Enabled():
 		bigTCPProto = advConnBigTCPIPv4
-	case params.BigTCPConfig().IsIPv6Enabled():
+	case params.BigTCPFeatures().IsIPv6Enabled():
 		bigTCPProto = advConnBigTCPIPv6
 	}
 
@@ -1139,4 +1125,22 @@ func (m Metrics) update(params enabledFeatures, config *option.DaemonConfig, lbC
 	if params.IsDynamicConfigSourceKindNodeConfig() {
 		m.ACLBCiliumNodeConfigEnabled.Set(1)
 	}
+}
+
+func (m Metrics) toGatherer() (prometheus.Gatherer, error) {
+	rv := reflect.ValueOf(m)
+	reg := prometheus.NewPedanticRegistry()
+	for _, f := range rv.Fields() {
+		if !f.CanInterface() {
+			continue
+		}
+		c, ok := reflect.TypeAssert[prometheus.Collector](f)
+		if !ok {
+			continue
+		}
+		if err := reg.Register(c); err != nil {
+			return nil, fmt.Errorf("registering metric: %w", err)
+		}
+	}
+	return reg, nil
 }

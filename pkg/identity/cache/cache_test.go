@@ -32,6 +32,7 @@ func testLookupReservedIdentity(t *testing.T, testConfig testConfig, client kvst
 	logger := hivetest.Logger(t)
 	mgr := NewCachingIdentityAllocator(logger, newDummyOwner(logger), testConfig.allocatorConfig)
 	<-mgr.InitIdentityAllocator(nil, client)
+	defer mgr.Close()
 
 	hostID := identity.GetReservedID("host")
 	require.NotNil(t, mgr.LookupIdentityByID(context.TODO(), hostID))
@@ -47,7 +48,7 @@ func testLookupReservedIdentity(t *testing.T, testConfig testConfig, client kvst
 	require.NotNil(t, id)
 	require.Equal(t, worldID, id.ID)
 
-	identity.InitWellKnownIdentities(fakeConfig, cmtypes.ClusterInfo{Name: "default", ID: 5})
+	identity.InitWellKnownIdentities("kube-system", cmtypes.ClusterInfo{Name: "default", ID: 5})
 }
 
 func TestLookupReservedIdentityByLabels(t *testing.T) {

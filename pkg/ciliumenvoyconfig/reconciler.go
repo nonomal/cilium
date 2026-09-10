@@ -9,14 +9,19 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
+	"maps"
 	"strings"
 
+	"github.com/cilium/hive/cell"
+	"github.com/cilium/hive/job"
 	"github.com/cilium/statedb"
 	"github.com/cilium/statedb/reconciler"
 	envoy_config_listener "github.com/envoyproxy/go-control-plane/envoy/config/listener/v3"
 	"google.golang.org/protobuf/proto"
 	"k8s.io/apimachinery/pkg/util/sets"
 
+	"github.com/cilium/cilium/pkg/completion"
+	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/envoy"
 	"github.com/cilium/cilium/pkg/envoy/xds"
 	"github.com/cilium/cilium/pkg/loadbalancer"
@@ -24,6 +29,7 @@ import (
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 type envoyOps struct {
@@ -33,6 +39,71 @@ type envoyOps struct {
 	policyTrigger policyTrigger
 	writer        *writer.Writer
 	portAllocator PortAllocator
+
+	initDone      chan struct{}
+	resourceTable statedb.RWTable[*EnvoyResource]
+}
+
+// Initiailizer returns a function that sets up the downstream envoy resource cache
+// and starts the reconciler.
+func (ops *envoyOps) Initializer(config CECConfig, params reconciler.Params) job.OneShotFunc {
+	return func(ctx context.Context, _ cell.Health) error {
+		// Wait for EnvoyResources table to be initialized by CEC controller.
+		initialized, initDone := ops.resourceTable.Initialized(params.DB.ReadTxn())
+		for !initialized {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-initDone:
+				initialized = true
+			case <-time.After(time.Second):
+				pending := ops.resourceTable.PendingInitializers(params.DB.ReadTxn())
+				ops.log.Info("Waiting for envoy resources initializers",
+					logfields.PendingInitializers, pending)
+			}
+		}
+
+		// Before starting the reconciler, seed the xDS cache with the resources known so far so
+		// that Envoy xDS server can be started with an up-to-date snapshot.
+		// Don't wait for ACKs and don't ACK proxy ports, that is done later once the reconciler
+		// picks up these resources.
+		if err := ops.initializeResources(ctx, params.DB.ReadTxn()); err != nil {
+			ops.log.Error("Failed to initialize envoy resource xDS cache", logfields.Error, err)
+		}
+		close(ops.initDone)
+
+		_, err := reconciler.Register(
+			params,
+			ops.resourceTable,
+			(*EnvoyResource).Clone,
+			(*EnvoyResource).SetStatus,
+			(*EnvoyResource).GetStatus,
+			ops,
+			nil,
+			reconciler.WithoutPruning(),
+			reconciler.WithRetry(config.EnvoyConfigRetryInterval, config.EnvoyConfigRetryInterval),
+		)
+		return err
+	}
+}
+
+// initializeResources seeds the xDS cache with the currently known EnvoyResources so that Envoy
+// can be started with an up-to-date snapshot before the reconciler starts processing changes.
+func (ops *envoyOps) initializeResources(ctx context.Context, txn statedb.ReadTxn) error {
+	initCtx, cancel := context.WithTimeout(ctx, maxSyncWaitTime)
+	defer cancel()
+
+	merged := xds.NewResources()
+	for res := range ops.resourceTable.All(txn) {
+		maps.Copy(merged.Listeners, res.Resources.Listeners)
+		maps.Copy(merged.Routes, res.Resources.Routes)
+		maps.Copy(merged.Clusters, res.Resources.Clusters)
+		maps.Copy(merged.Endpoints, res.Resources.Endpoints)
+		maps.Copy(merged.Secrets, res.Resources.Secrets)
+		maps.Copy(merged.NetworkPolicies, res.Resources.NetworkPolicies)
+		maps.Copy(merged.NetworkPolicyHosts, res.Resources.NetworkPolicyHosts)
+	}
+	return ops.xds.UpdateEnvoyResources(initCtx, xds.NewResources(), merged, nil)
 }
 
 // Delete implements reconciler.Operations.
@@ -45,7 +116,7 @@ func (ops *envoyOps) Delete(ctx context.Context, _ statedb.ReadTxn, _ statedb.Re
 			svc, _, found := ops.writer.Services().Get(wtxn, loadbalancer.ServiceByName(name))
 			if found {
 				svc = svc.Clone()
-				svc.ProxyRedirect = nil
+				svc.ProxyRedirects = nil
 				ops.writer.UpsertService(wtxn, svc)
 			}
 		}
@@ -58,7 +129,7 @@ func (ops *envoyOps) Delete(ctx context.Context, _ statedb.ReadTxn, _ statedb.Re
 	if prev := res.ReconciledResources; prev != nil {
 		// Perform the deletion with the resources that were last successfully reconciled
 		// instead of whatever the latest one is (which would have not been pushed to Envoy).
-		err = ops.xds.DeleteEnvoyResources(ctx, *prev)
+		err = ops.xds.DeleteEnvoyResources(ctx, *prev, nil)
 
 		for _, listener := range prev.Listeners {
 			ops.portAllocator.ReleaseProxyPort(listener.Name)
@@ -93,8 +164,7 @@ func isPortBindingError(err error) bool {
 		return false
 	}
 
-	var proxyErr *xds.ProxyError
-	if errors.As(err, &proxyErr) {
+	if proxyErr, ok := errors.AsType[*xds.ProxyError](err); ok {
 		// Check ProxyError.Detail field which contains the actual Envoy error message
 		detail := strings.ToLower(proxyErr.Detail)
 		if strings.Contains(detail, "cannot bind") ||
@@ -111,13 +181,30 @@ func isPortBindingError(err error) bool {
 		strings.Contains(errStr, "eaddrinuse")
 }
 
+func (ops *envoyOps) updateEnvoyResources(ctx context.Context, prevResources, resources xds.Resources) error {
+	if len(resources.PortAllocationCallbacks) == 0 {
+		return ops.xds.UpdateEnvoyResources(ctx, prevResources, resources, nil)
+	}
+
+	// Port allocation callbacks are fired by the xDS N/ACK path, but only if there is a wait
+	// group. We also need to wait to find out if the allocated port failed to bind so that the
+	// caller may try again with a different port.
+	wg := completion.NewWaitGroup(ctx)
+	err := ops.xds.UpdateEnvoyResources(ctx, prevResources, resources, wg)
+	if err != nil {
+		wg.Cancel()
+		return err
+	}
+	return wg.Wait()
+}
+
 // retryWithNewPorts reallocates dynamically allocated ports and retries UpdateEnvoyResources.
-func (ops *envoyOps) retryWithNewPorts(ctx context.Context, prevResources, resources envoy.Resources) (envoy.Resources, error) {
-	newListeners := make([]*envoy_config_listener.Listener, 0, len(resources.Listeners))
+func (ops *envoyOps) retryWithNewPorts(ctx context.Context, prevResources, resources xds.Resources) (xds.Resources, error) {
+	newListeners := make(map[string]*envoy_config_listener.Listener, 0)
 
 	for _, listener := range resources.Listeners {
 		if listener.GetInternalListener() != nil {
-			newListeners = append(newListeners, listener)
+			newListeners[listener.Name] = listener
 			continue
 		}
 
@@ -143,14 +230,14 @@ func (ops *envoyOps) retryWithNewPorts(ctx context.Context, prevResources, resou
 				return ops.portAllocator.AckProxyPortWithReference(ctx, listenerName)
 			}
 
-			newListeners = append(newListeners, clonedListener)
+			newListeners[clonedListener.Name] = clonedListener
 		} else {
-			newListeners = append(newListeners, listener)
+			newListeners[listener.Name] = listener
 		}
 	}
 
 	resources.Listeners = newListeners
-	err := ops.xds.UpdateEnvoyResources(ctx, prevResources, resources)
+	err := ops.updateEnvoyResources(ctx, prevResources, resources)
 	return resources, err
 }
 
@@ -161,7 +248,7 @@ func (ops *envoyOps) Update(ctx context.Context, txn statedb.ReadTxn, _ statedb.
 	ctx, cancel := context.WithTimeout(ctx, ops.config.EnvoyConfigTimeout)
 	defer cancel()
 
-	var prevResources envoy.Resources
+	var prevResources xds.Resources
 	if res.ReconciledResources != nil {
 		prevResources = *res.ReconciledResources
 
@@ -182,7 +269,7 @@ func (ops *envoyOps) Update(ctx context.Context, txn statedb.ReadTxn, _ statedb.
 		}
 	}
 
-	err := ops.xds.UpdateEnvoyResources(ctx, prevResources, resources)
+	err := ops.updateEnvoyResources(ctx, prevResources, resources)
 
 	if err != nil && isPortBindingError(err) {
 		hasDynamicallyAllocatedPorts := false
@@ -224,11 +311,11 @@ func (ops *envoyOps) Update(ctx context.Context, txn statedb.ReadTxn, _ statedb.
 		if res.Redirects.Len() > 0 || res.ReconciledRedirects.Len() > 0 {
 			wtxn := ops.writer.WriteTxn()
 			orphanRedirects := res.ReconciledRedirects
-			for name, redirect := range res.Redirects.All() {
+			for name, redirects := range res.Redirects.All() {
 				svc, _, found := ops.writer.Services().Get(wtxn, loadbalancer.ServiceByName(name))
-				if found && !svc.ProxyRedirect.Equal(redirect) {
+				if found && !svc.ProxyRedirects.Equal(redirects) {
 					svc = svc.Clone()
-					svc.ProxyRedirect = redirect
+					svc.ProxyRedirects = redirects
 					ops.writer.UpsertService(wtxn, svc)
 				}
 				orphanRedirects = orphanRedirects.Delete(name)
@@ -238,7 +325,7 @@ func (ops *envoyOps) Update(ctx context.Context, txn statedb.ReadTxn, _ statedb.
 					svc, _, found := ops.writer.Services().Get(wtxn, loadbalancer.ServiceByName(name))
 					if found {
 						svc = svc.Clone()
-						svc.ProxyRedirect = nil
+						svc.ProxyRedirects = nil
 						ops.writer.UpsertService(wtxn, svc)
 					}
 				}
@@ -261,7 +348,8 @@ func registerEnvoyReconciler(
 	writer *writer.Writer,
 	envoyResources statedb.RWTable[*EnvoyResource],
 	portAllocator PortAllocator,
-) error {
+	fence regeneration.Fence,
+) {
 	ops := &envoyOps{
 		config:        config,
 		log:           log,
@@ -269,19 +357,24 @@ func registerEnvoyReconciler(
 		writer:        writer,
 		policyTrigger: pt,
 		portAllocator: portAllocator,
+
+		initDone:      make(chan struct{}),
+		resourceTable: envoyResources,
 	}
-	_, err := reconciler.Register(
-		params,
-		envoyResources,
-		(*EnvoyResource).Clone,
-		(*EnvoyResource).SetStatus,
-		(*EnvoyResource).GetStatus,
-		ops,
-		nil,
-		reconciler.WithoutPruning(),
-		reconciler.WithRetry(config.EnvoyConfigRetryInterval, config.EnvoyConfigRetryInterval),
-	)
-	return err
+
+	// Register initializer to block endpoint regeneration before Envoy cache is initialized.
+	fence.Add("ciliumenvoyconfig", func(ctx context.Context) error {
+		ctx, cancel := context.WithTimeout(ctx, maxSyncWaitTime)
+		defer cancel()
+
+		select {
+		case <-ctx.Done():
+			log.Error("Failed waiting on CiliumEnvoyConfig reconciler initialization", logfields.Error, ctx.Err())
+		case <-ops.initDone:
+		}
+		return nil
+	})
+	params.JobGroup.Add(job.OneShot("envoy-reconciler", ops.Initializer(config, params)))
 }
 
 type policyTriggerWrapper struct{ updater *policy.Updater }
@@ -295,8 +388,8 @@ func newPolicyTrigger(log *slog.Logger, updater *policy.Updater) policyTrigger {
 }
 
 type resourceMutator interface {
-	DeleteEnvoyResources(context.Context, envoy.Resources) error
-	UpdateEnvoyResources(context.Context, envoy.Resources, envoy.Resources) error
+	DeleteEnvoyResources(ctx context.Context, resources xds.Resources, waitGroup *completion.WaitGroup) error
+	UpdateEnvoyResources(ctx context.Context, old xds.Resources, new xds.Resources, waitGroup *completion.WaitGroup) error
 }
 
 type policyTrigger interface {
